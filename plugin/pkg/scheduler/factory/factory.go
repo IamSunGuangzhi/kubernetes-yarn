@@ -20,7 +20,6 @@ package factory
 
 import (
 	"fmt"
-	"math/rand"
 	"sync"
 	"time"
 
@@ -63,19 +62,10 @@ func (factory *ConfigFactory) Create() *scheduler.Config {
 		cache.NewPoller(factory.pollMinions, 10*time.Second, minionCache).Run()
 	}
 
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	minionLister := &storeToMinionLister{minionCache}
-
-	algo := algorithm.NewGenericScheduler(
-		[]algorithm.FitPredicate{
-			// Fit is defined based on the absence of port conflicts.
-			algorithm.PodFitsPorts,
-			// Fit is determined by resource availability
-			algorithm.NewResourceFitPredicate(minionLister),
-		},
-		// Prioritize nodes by least requested utilization.
-		algorithm.LeastRequestedPriority,
-		&storeToPodLister{podCache}, r)
+	//r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	//algo := algorithm.NewRandomFitScheduler(
+	//&storeToPodLister{podCache}, r)
+	algo := algorithm.NewYARNScheduler()
 
 	podBackoff := podBackoff{
 		perPodBackoff: map[string]*backoffEntry{},
