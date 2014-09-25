@@ -60,9 +60,6 @@ func (factory *ConfigFactory) Create() *scheduler.Config {
 		cache.NewPoller(factory.pollMinions, 10*time.Second, minionCache).Run()
 	}
 
-	//r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	//algo := algorithm.NewRandomFitScheduler(
-	//&storeToPodLister{podCache}, r)
 	algo := algorithm.NewYARNScheduler()
 
 	return &scheduler.Config{
