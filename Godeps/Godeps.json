@@ -103,7 +103,7 @@
 			"Rev": "ba570a111973b539baf23c918213059543b5bb6e"
     },
     {	
-    "ImportPath": "github.com/nu7hatch/gouuid",
+			"ImportPath": "github.com/nu7hatch/gouuid",
 			"Rev": "179d4d0c4d8d407a32af483c2354df1d2c91e6c3"
 		},
 		{
