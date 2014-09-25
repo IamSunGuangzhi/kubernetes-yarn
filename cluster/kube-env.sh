@@ -20,4 +20,5 @@
 #
 # The valid values: 'gce', 'azure', 'vagrant', 'local', 'vsphere'
 
-KUBERNETES_PROVIDER=${KUBERNETES_PROVIDER:-gce}
+#KUBERNETES_PROVIDER=${KUBERNETES_PROVIDER:-gce}
+KUBERNETES_PROVIDER=vagrant

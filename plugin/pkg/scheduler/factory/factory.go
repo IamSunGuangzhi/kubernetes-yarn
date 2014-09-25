@@ -19,7 +19,6 @@ limitations under the License.
 package factory
 
 import (
-	"math/rand"
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
@@ -61,9 +60,10 @@ func (factory *ConfigFactory) Create() *scheduler.Config {
 		cache.NewPoller(factory.pollMinions, 10*time.Second, minionCache).Run()
 	}
 
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	algo := algorithm.NewRandomFitScheduler(
-		&storeToPodLister{podCache}, r)
+	//r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	//algo := algorithm.NewRandomFitScheduler(
+	//&storeToPodLister{podCache}, r)
+	algo := algorithm.NewYARNScheduler()
 
 	return &scheduler.Config{
 		MinionLister: &storeToMinionLister{minionCache},
