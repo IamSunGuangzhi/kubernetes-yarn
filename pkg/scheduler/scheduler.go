@@ -25,3 +25,11 @@ import (
 type Scheduler interface {
 	Schedule(api.Pod, MinionLister) (selectedMachine string, err error)
 }
+
+//hack: creating a new type so that existing schedulers aren't broken.
+//a better way to handle this is necessary.
+//See : https://github.com/GoogleCloudPlatform/kubernetes/issues/1517
+type StatefulScheduler interface {
+	Scheduler
+	Delete(id string) error
+}
