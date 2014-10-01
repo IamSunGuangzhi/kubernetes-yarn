@@ -48,7 +48,6 @@ func (factory *ConfigFactory) Create() *scheduler.Config {
 	// Watch and cache all running pods. Scheduler needs to find all pods
 	// so it knows where it's safe to place a pod. Cache this locally.
 	podCache := cache.NewStore()
-	cache.NewReflector(factory.createAssignedPodLW(), &api.Pod{}, podCache).Run()
 
 	// Watch minions.
 	// Minions may be listed frequently, so provide a local up-to-date cache.
@@ -61,6 +60,20 @@ func (factory *ConfigFactory) Create() *scheduler.Config {
 	}
 
 	algo := algorithm.NewYARNScheduler()
+	//r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	/*algo := algorithm.NewGenericScheduler(
+	  // Fit is defined based on the absence of port conflicts.
+	  []algorithm.FitPredicate{algorithm.PodFitsPorts},
+	  // All nodes where things fit are equally likely (Random)
+	  algorithm.EqualPriority,
+	  &storeToPodLister{podCache}, r)*/
+
+	//wrap the pod cache so that the scheduler can be notified of "deletes"
+	//the dependency here is "inverted". The generic scheduler depends on the podCache
+	//and the schedulerPodCache below depends on the scheduler. This needs to be fixed.
+	//See : https://github.com/GoogleCloudPlatform/kubernetes/issues/1517
+	schedulerPodCache := NewSchedulerCache(podCache, algo)
+	cache.NewReflector(factory.createAssignedPodLW(), &api.Pod{}, schedulerPodCache).Run()
 
 	return &scheduler.Config{
 		MinionLister: &storeToMinionLister{minionCache},
@@ -68,7 +81,7 @@ func (factory *ConfigFactory) Create() *scheduler.Config {
 		Binder:       &binder{factory.Client},
 		NextPod: func() *api.Pod {
 			pod := podQueue.Pop().(*api.Pod)
-			glog.V(2).Infof("About to try and schedule pod %v\n"+
+			glog.V(0).Infof("About to try and schedule pod %v\n"+
 				"\tknown minions: %v\n"+
 				"\tknown scheduled pods: %v\n",
 				pod.ID, minionCache.Contains(), podCache.Contains())
