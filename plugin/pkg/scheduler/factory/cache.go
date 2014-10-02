@@ -28,8 +28,8 @@ func (c *schedulerCache) Update(id string, obj interface{}) {
 }
 
 func (c *schedulerCache) Delete(id string) {
-	glog.V(0).Infof("the following pod has been deleted: %s", id)
 	c.store.Delete(id)
+	glog.V(0).Infof("the following pod has been deleted from cache: %s. notifying scheduler", id)
 
 	if statefulScheduler, ok := c.scheduler.(scheduler.StatefulScheduler); ok {
 		statefulScheduler.Delete(id)
