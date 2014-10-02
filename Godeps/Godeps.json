@@ -249,7 +249,7 @@
 		},
 		{
 			"ImportPath": "github.com/hortonworks/gohadoop",
-			"Rev": "9a239ecb3792866fe67518d5f6f993c47ba4b4be"
+			"Rev": "aafabede759e71b4416e5d47e1f9f94166e52172"
 		},
 		{
 			"ImportPath": "github.com/mitchellh/goamz/aws",

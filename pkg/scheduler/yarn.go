@@ -129,8 +129,20 @@ func NewYARNScheduler() Scheduler {
 }
 
 func (yarnScheduler *YARNScheduler) Delete(id string) error {
-	log.Println("yarn delete hook")
+	log.Printf("attempting to delete pods with id: %s", id)
+	rmClient := yarnScheduler.rmClient
+	containerId, found := yarnScheduler.podsToContainersMap[id]
+	if !found {
+		return errors.New("attempting to delete a pod that doesn't have an associated container")
+	}
 
+	rmClient.ReleaseAssignedContainer(containerId)
+	allocateResponse, err := rmClient.Allocate()
+	if err != nil {
+		return errors.New("YARN returned an allocation error when releasing container")
+	}
+
+	log.Println("allocateResponse(release): ", allocateResponse)
 	return nil
 }
 
@@ -149,34 +161,35 @@ func (yarnScheduler *YARNScheduler) Schedule(pod api.Pod, minionLister MinionLis
 	rmClient.AddRequest(1, "*", &resource, numContainers)
 
 	for numAllocatedContainers < numContainers && allocationAttempts < maxAllocationAttempts {
-		// Sleep for a while
-		log.Println("Sleeping...")
-		time.Sleep(3 * time.Second)
-		log.Println("Sleeping... done!")
-
 		// Try to get containers now...
 		allocateResponse, err := rmClient.Allocate()
-		if err == nil {
-			log.Println("allocateResponse: ", *allocateResponse)
+		if err != nil {
+			return "<invalid_host>", errors.New("YARN returned an allocation error")
 		}
+
+		log.Println("allocateResponse(resource): ", *allocateResponse)
 
 		for _, container := range allocateResponse.AllocatedContainers {
 			allocatedContainers[numAllocatedContainers] = container
 			numAllocatedContainers++
 			log.Println("#containers allocated so far: ", numAllocatedContainers)
 
-			//We have the hostname available. return from here.
 			yarnScheduler.podsToContainersMap[pod.ID] = container.GetId()
 			host := *container.NodeId.Host
-
 			log.Println("allocated container on: ", host)
 
+			//We have the hostname available. return from here.
 			return findMinionForHost(host, minionLister)
 		}
 
 		allocationAttempts++
 		log.Println("#containers allocated: ", len(allocateResponse.AllocatedContainers))
 		log.Println("Total #containers allocated so far: ", numAllocatedContainers)
+
+		// Sleep for a while before trying again
+		log.Println("Sleeping...")
+		time.Sleep(3 * time.Second)
+		log.Println("Sleeping... done!")
 	}
 
 	log.Println("Final #containers allocated: ", numAllocatedContainers)
@@ -210,7 +223,7 @@ func findMinionForHost(host string, minionLister MinionLister) (string, error) {
 
 			for _, minionIP := range minionIPs {
 				if hostIP.Equal(minionIP) {
-					log.Printf("YARN host %s maps to minion: %s", host, minion)
+					log.Printf("YARN node %s maps to minion: %s", host, minion)
 					return minion, nil
 				}
 			}
