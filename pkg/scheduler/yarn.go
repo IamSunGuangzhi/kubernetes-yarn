@@ -7,7 +7,9 @@ import (
 	"github.com/hortonworks/gohadoop/hadoop_yarn"
 	"github.com/hortonworks/gohadoop/hadoop_yarn/conf"
 	"github.com/hortonworks/gohadoop/hadoop_yarn/yarn_client"
+
 	"log"
+	"net"
 	"os"
 	"time"
 )
@@ -133,32 +135,27 @@ func (yarnScheduler *YARNScheduler) Delete(id string) error {
 }
 
 func (yarnScheduler *YARNScheduler) Schedule(pod api.Pod, minionLister MinionLister) (string, error) {
-
 	rmClient := yarnScheduler.rmClient
 
 	// Add resource requests
 	const numContainers = int32(1)
 	memory := int32(128)
 	resource := hadoop_yarn.ResourceProto{Memory: &memory}
+	numAllocatedContainers := int32(0)
+	const maxAllocationAttempts = int(5)
+	allocationAttempts := 0
+	allocatedContainers := make([]*hadoop_yarn.ContainerProto, numContainers, numContainers)
+
 	rmClient.AddRequest(1, "*", &resource, numContainers)
 
-	// Now call ResourceManager.allocate
-	allocateResponse, err := rmClient.Allocate()
-	if err == nil {
-		log.Println("allocateResponse: ", *allocateResponse)
-	}
-	log.Println("#containers allocated: ", len(allocateResponse.AllocatedContainers))
-
-	numAllocatedContainers := int32(0)
-	allocatedContainers := make([]*hadoop_yarn.ContainerProto, numContainers, numContainers)
-	for numAllocatedContainers < numContainers {
+	for numAllocatedContainers < numContainers && allocationAttempts < maxAllocationAttempts {
 		// Sleep for a while
 		log.Println("Sleeping...")
 		time.Sleep(3 * time.Second)
 		log.Println("Sleeping... done!")
 
 		// Try to get containers now...
-		allocateResponse, err = rmClient.Allocate()
+		allocateResponse, err := rmClient.Allocate()
 		if err == nil {
 			log.Println("allocateResponse: ", *allocateResponse)
 		}
@@ -170,13 +167,55 @@ func (yarnScheduler *YARNScheduler) Schedule(pod api.Pod, minionLister MinionLis
 
 			//We have the hostname available. return from here.
 			yarnScheduler.podsToContainersMap[pod.ID] = container.GetId()
-			return *container.NodeId.Host, nil
+			host := *container.NodeId.Host
+
+			log.Println("allocated container on: ", host)
+
+			return findMinionForHost(host, minionLister)
 		}
 
+		allocationAttempts++
 		log.Println("#containers allocated: ", len(allocateResponse.AllocatedContainers))
 		log.Println("Total #containers allocated so far: ", numAllocatedContainers)
 	}
+
 	log.Println("Final #containers allocated: ", numAllocatedContainers)
 
-	return "<invalid_host>", errors.New("invalid_host")
+	return "<invalid_host>", errors.New("unable to schedule pod! YARN didn't allocate a container")
+}
+
+/* YARN returns hostnames, but minions maybe using IPs.
+TODO: This is an expensive mechanism to find the right minion corresponding to the YARN node.
+      Find a better mechanism if possible
+*/
+func findMinionForHost(host string, minionLister MinionLister) (string, error) {
+	hostIPs, err := net.LookupIP(host)
+
+	if err != nil {
+		return "<invalid_host>", errors.New("unable to lookup IPs for YARN host: " + host)
+	}
+
+	for _, hostIP := range hostIPs {
+		minions, err := minionLister.List()
+		if err != nil {
+			return "<invalid_host>", errors.New("update to list minions")
+		}
+
+		for _, minion := range minions {
+			minionIPs, err := net.LookupIP(minion)
+
+			if err != nil {
+				return "<invalid_host>", errors.New("unable to lookup IPs for minion: " + minion)
+			}
+
+			for _, minionIP := range minionIPs {
+				if hostIP.Equal(minionIP) {
+					log.Printf("YARN host %s maps to minion: %s", host, minion)
+					return minion, nil
+				}
+			}
+		}
+	}
+
+	return "<invalid_host>", errors.New("unable to find minion for YARN host: " + host)
 }
