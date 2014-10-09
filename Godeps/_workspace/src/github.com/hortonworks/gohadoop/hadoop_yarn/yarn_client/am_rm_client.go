@@ -11,6 +11,7 @@ type AMRMClient struct {
 	applicationAttemptId *hadoop_yarn.ApplicationAttemptIdProto
 	client               hadoop_yarn.ApplicationMasterProtocolService
 	responseId           int32
+	conf                 yarn_conf.YarnConfiguration
 }
 
 type resource_to_request struct {
@@ -27,7 +28,7 @@ var allocationRequests = struct {
 
 func CreateAMRMClient(conf yarn_conf.YarnConfiguration, applicationAttemptId *hadoop_yarn.ApplicationAttemptIdProto) (*AMRMClient, error) {
 	c, err := hadoop_yarn.DialApplicationMasterProtocolService(conf)
-	return &AMRMClient{applicationAttemptId: applicationAttemptId, client: c}, err
+	return &AMRMClient{applicationAttemptId: applicationAttemptId, client: c, conf: conf}, err
 }
 
 func (c *AMRMClient) RegisterApplicationMaster(host string, port int32, url string) error {
@@ -45,8 +46,8 @@ func (c *AMRMClient) FinishApplicationMaster(finalStatus *hadoop_yarn.FinalAppli
 func (c *AMRMClient) ReleaseAssignedContainer(containerId *hadoop_yarn.ContainerIdProto) {
 	if containerId != nil {
 		allocationRequests.Lock()
+		defer allocationRequests.Unlock()
 		allocationRequests.releaseRequests[containerId] = true
-		allocationRequests.Unlock()
 	}
 }
 
@@ -70,14 +71,15 @@ func (c *AMRMClient) AddRequest(priority int32, resourceName string, capability 
 }
 
 func (c *AMRMClient) Allocate() (*hadoop_yarn.AllocateResponseProto, error) {
+	allocationRequests.Lock()
+	defer allocationRequests.Unlock()
+
 	// Increment responseId
 	c.responseId++
-	log.Println("ResponseId: ", c.responseId)
 
 	asks := []*hadoop_yarn.ResourceRequestProto{}
 
 	// Set up resource-requests
-	allocationRequests.Lock()
 	for priority, requests := range allocationRequests.resourceRequests {
 		for host, request := range requests {
 			log.Println("priority: ", priority)
@@ -94,15 +96,17 @@ func (c *AMRMClient) Allocate() (*hadoop_yarn.AllocateResponseProto, error) {
 		releases = append(releases, containerId)
 	}
 
-	log.Printf("AMRMClient.Allocate #asks: %d #releases: %d", len(asks), len(releases))
+	if len(asks) > 0 || len(releases) > 0 {
+		log.Printf("AMRMClient.Allocate #asks: %d #releases: %d", len(asks), len(releases))
+	}
 
 	// Clear
 	allocationRequests.resourceRequests = make(map[int32]map[string]*resource_to_request)
 	allocationRequests.releaseRequests = make(map[*hadoop_yarn.ContainerIdProto]bool)
-	allocationRequests.Unlock()
 
 	request := hadoop_yarn.AllocateRequestProto{ApplicationAttemptId: c.applicationAttemptId, Ask: asks, Release: releases, ResponseId: &c.responseId}
 	response := hadoop_yarn.AllocateResponseProto{}
 	err := c.client.Allocate(&request, &response)
+
 	return &response, err
 }
