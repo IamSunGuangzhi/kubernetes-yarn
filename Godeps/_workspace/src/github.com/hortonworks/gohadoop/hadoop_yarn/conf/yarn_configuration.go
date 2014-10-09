@@ -10,12 +10,14 @@ const (
 )
 
 const (
-	YARN_PREFIX                  = "yarn."
-	RM_PREFIX                    = YARN_PREFIX + "resourcemanager."
-	RM_ADDRESS                   = RM_PREFIX + "address"
-	DEFAULT_RM_ADDRESS           = "0.0.0.0:8032"
-	RM_SCHEDULER_ADDRESS         = RM_PREFIX + "scheduler.address"
-	DEFAULT_RM_SCHEDULER_ADDRESS = "0.0.0.0:8030"
+	YARN_PREFIX                      = "yarn."
+	RM_PREFIX                        = YARN_PREFIX + "resourcemanager."
+	RM_ADDRESS                       = RM_PREFIX + "address"
+	DEFAULT_RM_ADDRESS               = "0.0.0.0:8032"
+	RM_SCHEDULER_ADDRESS             = RM_PREFIX + "scheduler.address"
+	DEFAULT_RM_SCHEDULER_ADDRESS     = "0.0.0.0:8030"
+	RM_AM_EXPIRY_INTERVAL_MS         = YARN_PREFIX + "am.liveness-monitor.expiry-interval-ms"
+	DEFAULT_RM_AM_EXPIRY_INTERVAL_MS = 600000
 )
 
 type yarn_configuration struct {
@@ -28,6 +30,12 @@ type YarnConfiguration interface {
 
 	SetRMAddress(address string) error
 	SetRMSchedulerAddress(address string) error
+
+	Get(key string, defaultValue string) (string, error)
+	GetInt(key string, defaultValue int) (int, error)
+
+	Set(key string, value string) error
+	SetInt(key string, value int) error
 }
 
 func (yarn_conf *yarn_configuration) Get(key string, defaultValue string) (string, error) {

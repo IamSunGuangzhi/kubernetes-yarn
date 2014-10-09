@@ -88,7 +88,7 @@
 		},
 		{
 			"ImportPath": "github.com/hortonworks/gohadoop",
-			"Rev": "aafabede759e71b4416e5d47e1f9f94166e52172"
+			"Rev": "f0eef8a43507ef5c31f9aea68f08f3cbc0a1f8e9"
 		},
 		{
 			"ImportPath": "github.com/mitchellh/goamz/aws",
