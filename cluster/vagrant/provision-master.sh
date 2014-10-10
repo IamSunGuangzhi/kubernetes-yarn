@@ -112,6 +112,13 @@ pushd /kube-install
   ./kubernetes/saltbase/install.sh "${server_binary_tar##*/}"
 popd
 
+#Install hadoop before installing kubernetes
+echo "Installing hadoop ..."
+pushd /vagrant/cluster/vagrant
+./provision-hadoop.sh $MASTER_IP $MINION_IPS
+./restart-yarn-rm.sh
+popd
+
 # we will run provision to update code each time we test, so we do not want to do salt installs each time
 if ! which salt-master >/dev/null 2>&1; then
 
@@ -148,7 +155,6 @@ EOF
 fi
 
 if ! which salt-minion >/dev/null 2>&1; then
-
   # Install Salt minion
   curl -sS -L --connect-timeout 20 --retry 6 --retry-delay 10 https://bootstrap.saltstack.com | sh -s
 
