@@ -11,7 +11,8 @@ JAVA_HOME=/usr/lib/jvm/${JDK_PKG_VER}.x86_64
 HADOOP_INSTALL_DIR=/home/vagrant/hadoop/install
 HADOOP_HOME=${HADOOP_INSTALL_DIR}/hadoop-2.6.0-SNAPSHOT
 ENV_CONFIG=${HADOOP_HOME}/env.sh
-HADOOP_ARCHIVE=./hadoop/hadoop-2.6.0-SNAPSHOT.tgz
+HADOOP_ARCHIVE_DIR=./hadoop
+HADOOP_ARCHIVE=${HADOOP_ARCHIVE_DIR}/hadoop-2.6.0-SNAPSHOT.tgz
 YARN_SITE=${HADOOP_HOME}/etc/hadoop/yarn-site.xml
 SLAVES=${HADOOP_HOME}/etc/hadoop/slaves
 
@@ -20,6 +21,14 @@ then
   echo "hadoop home : ${HADOOP_HOME} already exists. terminating installation"
   exit 0
 fi
+
+if [ ! -f "${HADOOP_ARCHIVE}" ]
+then
+  echo -n "hadoop archive not found. downloading archive ( ~140MB ). this could take a while ...  "
+  mkdir -p $HADOOP_ARCHIVE_DIR
+  curl -s -S -L http://bit.ly/kubernetes-yarn-hadoop-snapshot -o $HADOOP_ARCHIVE
+  echo "done."
+fi 
 
 echo "installing JDK: $JDK_PKG_VER $JDK_DEVEL_PKG_VER ... "
 yum install -y $JDK_PKG_VER $JDK_DEVEL_PKG_VER
