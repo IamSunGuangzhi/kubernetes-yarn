@@ -8,3 +8,15 @@ source ${HADOOP_HOME}/env.sh
 ${HADOOP_HOME}/sbin/yarn-daemon.sh stop resourcemanager
 ${HADOOP_HOME}/sbin/yarn-daemon.sh start resourcemanager
 
+DELAY=30
+
+echo -n "Giving YARN Resource Manager $DELAY seconds to initialize "
+
+for ((I=0; $I<$DELAY; I++))
+do
+        echo -n "."
+        sleep 1
+done
+
+echo " done."
+
