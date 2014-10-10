@@ -54,6 +54,14 @@ grains:
   minion_ip: $MINION_IP
 EOF
 
+#Install hadoop before installing kubernetes
+echo "Installing hadoop ..."
+pushd /vagrant/cluster/vagrant
+./provision-hadoop.sh $MASTER_IP $MINION_IPS
+./restart-yarn-nm.sh
+popd
+
+
 # we will run provision to update code each time we test, so we do not want to do salt install each time
 if ! which salt-minion >/dev/null 2>&1; then
   # Install Salt

@@ -106,6 +106,13 @@ EOF
 
 fi
 
+#Install hadoop before installing kubernetes
+echo "Installing hadoop ..."
+pushd /vagrant/cluster/vagrant
+./provision-hadoop.sh $MASTER_IP $MINION_IPS
+./restart-yarn-rm.sh
+popd
+
 # Build release
 echo "Building release"
 pushd /vagrant
