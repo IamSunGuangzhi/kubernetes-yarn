@@ -100,14 +100,25 @@ func YARNInit(handler *yarnSchedulerCallbackHandler) (*yarn_client.YarnClient, *
 		}
 	}
 
-	amRmToken := appReport.GetAmRmToken()
+  amRmToken := appReport.GetAmRmToken();
+  for amRmToken == nil {
+    log.Println("AMRMToken is nil. sleeping before trying again.")
+    time.Sleep(1 * time.Second)
+    appReport, err = yarnClient.GetApplicationReport(asc.ApplicationId)
+    if (err != nil) {
+      log.Println("Failed to get application report! error: ", err)
+      return nil, nil
+    }
+    amRmToken = appReport.GetAmRmToken();
+  }
 
-	if amRmToken != nil {
-		savedAmRmToken := *amRmToken
-		service, _ := conf.GetRMSchedulerAddress()
-		savedAmRmToken.Service = &service
-		security.GetCurrentUser().AddUserToken(&savedAmRmToken)
-	}
+  if amRmToken != nil {
+    savedAmRmToken := *amRmToken
+    service, _ := conf.GetRMSchedulerAddress()
+    savedAmRmToken.Service = &service
+    log.Println("Saving token with address: ", service)
+    security.GetCurrentUser().AddUserToken(&savedAmRmToken)
+  }
 
 	log.Println("Application in state ", appState)
 
@@ -117,6 +128,7 @@ func YARNInit(handler *yarnSchedulerCallbackHandler) (*yarn_client.YarnClient, *
 	applicationAttemptId := hadoop_yarn.ApplicationAttemptIdProto{ApplicationId: asc.ApplicationId, AttemptId: &attemptId}
 
 	rmClient, _ := yarn_client.CreateAMRMClientAsync(conf, &applicationAttemptId, allocateIntervalMs, *handler)
+
 	log.Println("Created RM client: ", rmClient)
 
 	// Wait for ApplicationAttempt to be in Launched state
