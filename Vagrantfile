@@ -22,8 +22,8 @@ $kube_os = ENV['KUBERNETES_OS'] || "fedora"
 # OS platform to box information
 $kube_box = {
   "fedora" => {
-    "name" => "fedora20",
-    "box_url" => "http://opscode-vm-bento.s3.amazonaws.com/vagrant/virtualbox/opscode_fedora-20_chef-provisionerless.box"
+    "name" => "fedora20-salt-hadoop",
+    "box_url" => "http://bit.ly/fedora20-salt-hadoop-hosted"
   }
 }
 
@@ -61,7 +61,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.vm.define "master" do |config|
     customize_vm config
 
-    config.vm.provision "shell", inline: "/vagrant/cluster/vagrant/provision-master.sh #{$master_ip} #{$num_minion} #{$minion_ips_str}"
+    config.vm.provision "shell", inline: "/vagrant/cluster/vagrant/provision-master-existing-saltstack.sh #{$master_ip} #{$num_minion} #{$minion_ips_str}"
     config.vm.network "private_network", ip: "#{$master_ip}"
     config.vm.hostname = "kubernetes-master"
 end
@@ -73,7 +73,7 @@ end
 
       minion_index = n+1
       minion_ip = $minion_ips[n]
-      minion.vm.provision "shell", inline: "/vagrant/cluster/vagrant/provision-minion.sh #{$master_ip} #{$num_minion} #{$minion_ips_str} #{minion_ip} #{minion_index}"
+      minion.vm.provision "shell", inline: "/vagrant/cluster/vagrant/provision-minion-existing-saltstack.sh #{$master_ip} #{$num_minion} #{$minion_ips_str} #{minion_ip} #{minion_index}"
       minion.vm.network "private_network", ip: "#{minion_ip}"
       minion.vm.hostname = "kubernetes-minion-#{minion_index}"
     end
