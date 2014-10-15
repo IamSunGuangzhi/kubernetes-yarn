@@ -36,6 +36,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     config.vm.provision "shell", inline: "/vagrant/cluster/vagrant/provision-master-existing-saltstack.sh #{master_ip} #{num_minion} #{minion_ips_str}"
     config.vm.network "private_network", ip: "#{master_ip}"
     config.vm.hostname = "kubernetes-master"
+    config.vm.post_up_message = "completed provisioning master."
   end
 
   # Kubernetes minion
@@ -48,6 +49,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       minion.vm.provision "shell", inline: "/vagrant/cluster/vagrant/provision-minion-existing-saltstack.sh #{master_ip} #{num_minion} #{minion_ips_str} #{minion_ip} #{minion_index}"
       minion.vm.network "private_network", ip: "#{minion_ip}"
       minion.vm.hostname = "kubernetes-minion-#{minion_index}"
+      minion.vm.post_up_message = sprintf("completed provisioning minion-%d", n+1)
     end
   end
 
