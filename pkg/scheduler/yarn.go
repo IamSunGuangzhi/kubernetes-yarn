@@ -254,17 +254,18 @@ func findMinionForHost(host string, minionLister MinionLister) (string, error) {
 			return "<invalid_host>", errors.New("update to list minions")
 		}
 
-		for _, minion := range minions {
-			minionIPs, err := net.LookupIP(minion)
+		for _, minion := range minions.Items {
+      minionStr := minion.ID
+			minionIPs, err := net.LookupIP(minionStr)
 
 			if err != nil {
-				return "<invalid_host>", errors.New("unable to lookup IPs for minion: " + minion)
+				return "<invalid_host>", errors.New("unable to lookup IPs for minion: " + minionStr)
 			}
 
 			for _, minionIP := range minionIPs {
 				if hostIP.Equal(minionIP) {
-					log.Printf("YARN node %s maps to minion: %s", host, minion)
-					return minion, nil
+					log.Printf("YARN node %s maps to minion: %s", host, minionStr)
+					return minionStr, nil
 				}
 			}
 		}

@@ -16,17 +16,48 @@
 
 # exit on any error
 set -e
-source $(dirname $0)/provision-config.sh
+
+KUBE_ROOT=$(dirname "${BASH_SOURCE}")/../..
+source "${KUBE_ROOT}/cluster/vagrant/provision-config.sh"
+
+function release_not_found() {
+  echo "It looks as if you don't have a compiled version of Kubernetes.  If you" >&2
+  echo "are running from a clone of the git repo, please run ./build/release.sh." >&2
+  echo "Note that this requires having Docker installed.  If you are running " >&2
+  echo "from a release tarball, something is wrong.  Look at " >&2
+  echo "http://kubernetes.io/ for information on how to contact the development team for help." >&2
+  exit 1
+}
+
+# Look for our precompiled binary releases.  When running from a source repo,
+# these are generated under _output.  When running from an release tarball these
+# are under ./server.
+server_binary_tar="/vagrant/server/kubernetes-server-linux-amd64.tar.gz"
+if [[ ! -f "$server_binary_tar" ]]; then
+  server_binary_tar="/vagrant/_output/release-tars/kubernetes-server-linux-amd64.tar.gz"
+fi
+if [[ ! -f "$server_binary_tar" ]]; then
+  release_not_found
+fi
+
+salt_tar="/vagrant/server/kubernetes-salt.tar.gz"
+if [[ ! -f "$salt_tar" ]]; then
+  salt_tar="/vagrant/_output/release-tars/kubernetes-salt.tar.gz"
+fi
+if [[ ! -f "$salt_tar" ]]; then
+  release_not_found
+fi
+
 
 # Setup hosts file to support ping by hostname to each minion in the cluster from apiserver
 minion_ip_array=(${MINION_IPS//,/ })
 for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
   minion=${MINION_NAMES[$i]}
-  ip=${minion_ip_array[$i]}  
+  ip=${minion_ip_array[$i]}
   if [ ! "$(cat /etc/hosts | grep $minion)" ]; then
     echo "Adding $minion to hosts file"
     echo "$ip $minion" >> /etc/hosts
-  fi  
+  fi
 done
 
 # Update salt configuration
@@ -66,12 +97,27 @@ state_output: mixed
 EOF
 
 # Configure nginx authorization
-mkdir -p $KUBE_TEMP
-mkdir -p /srv/salt/nginx
-echo "Using password: $MASTER_USER:$MASTER_PASSWD"
-python $(dirname $0)/../../third_party/htpasswd/htpasswd.py -b -c ${KUBE_TEMP}/htpasswd $MASTER_USER $MASTER_PASSWD
-MASTER_HTPASSWD=$(cat ${KUBE_TEMP}/htpasswd)
-echo $MASTER_HTPASSWD > /srv/salt/nginx/htpasswd
+mkdir -p "$KUBE_TEMP"
+mkdir -p /srv/salt-overlay/salt/nginx
+python "${KUBE_ROOT}/third_party/htpasswd/htpasswd.py" -b -c "${KUBE_TEMP}/htpasswd" "$MASTER_USER" "$MASTER_PASSWD"
+MASTER_HTPASSWD=$(cat "${KUBE_TEMP}/htpasswd")
+echo $MASTER_HTPASSWD > /srv/salt-overlay/salt/nginx/htpasswd
+
+#Install hadoop before installing kubernetes
+echo "Installing hadoop ..."
+pushd /vagrant/cluster/vagrant
+./provision-hadoop-existing-hadoop.sh $MASTER_IP $MINION_IPS
+./restart-yarn-rm.sh
+popd
+
+echo "Running release install script"
+rm -rf /kube-install
+mkdir -p /kube-install
+pushd /kube-install
+  tar xzf "$salt_tar"
+  cp "$server_binary_tar" .
+  ./kubernetes/saltbase/install.sh "${server_binary_tar##*/}"
+popd
 
 # Configure the salt-api
 cat <<EOF >/etc/salt/master.d/salt-api.conf
@@ -108,24 +154,15 @@ SYSTEMD_LOG_LEVEL=notice systemctl enable salt-api
 systemctl stop salt-api
 systemctl start salt-api
 
-#Install hadoop before installing kubernetes
-echo "Installing hadoop ..."
-pushd /vagrant/cluster/vagrant
-./provision-hadoop-existing-hadoop.sh $MASTER_IP $MINION_IPS
-./restart-yarn-rm.sh
-popd
+DELAY=5
+echo -n "giving salt master $DELAY seconds to come up.."
+for((I=0;$I<$DELAY;I++))
+do
+        echo -n "."
+        sleep 1
+done
 
-# Build release
-echo "Building release"
-pushd /vagrant
-  ./release/build-release.sh kubernetes
-popd
+echo " done."
 
-echo "Running release install script"
-pushd /vagrant/_output/release/master-release/src/scripts
-  ./master-release-install.sh
-popd
-
-echo "Executing configuration"
 salt '*' mine.update
 salt --force-color '*' state.highstate

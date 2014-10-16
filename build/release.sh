@@ -25,6 +25,9 @@ set -o pipefail
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
 source "$KUBE_ROOT/build/common.sh"
 
+#dont run tests with YARNScheduler in place
+KUBE_RELEASE_RUN_TESTS=no
+
 KUBE_RELEASE_RUN_TESTS=${KUBE_RELEASE_RUN_TESTS-y}
 
 kube::build::verify_prereqs
