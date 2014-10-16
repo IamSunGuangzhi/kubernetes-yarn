@@ -48,7 +48,6 @@ if [[ ! -f "$salt_tar" ]]; then
   release_not_found
 fi
 
-
 # Setup hosts file to support ping by hostname to each minion in the cluster from apiserver
 minion_ip_array=(${MINION_IPS//,/ })
 for (( i=0; i<${#MINION_NAMES[@]}; i++)); do

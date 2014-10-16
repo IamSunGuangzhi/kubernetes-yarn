@@ -62,8 +62,7 @@ func (factory *ConfigFactory) Create() *scheduler.Config {
 	}
 
 	algo := algorithm.NewYARNScheduler()
-  minionLister := &storeToMinionLister{minionCache}
-  
+	minionLister := &storeToMinionLister{minionCache}
 	//r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	/*algo := algorithm.NewGenericScheduler(
 	  // Fit is defined based on the absence of port conflicts.

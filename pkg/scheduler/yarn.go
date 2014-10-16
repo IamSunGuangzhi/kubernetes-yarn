@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"errors"
+
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/hortonworks/gohadoop/hadoop_common/security"
 	"github.com/hortonworks/gohadoop/hadoop_yarn"
@@ -15,32 +16,32 @@ import (
 )
 
 const (
-  allocateIntervalMs = 1000 //1 second - keep this low to avoid excessive allocation delays
-  maxCallbackNotifications = 16
+	allocateIntervalMs       = 1000 //1 second - keep this low to avoid excessive allocation delays
+	maxCallbackNotifications = 16
 )
 
 type YARNScheduler struct {
-  yarnClient          *yarn_client.YarnClient
-  rmClient            *yarn_client.AMRMClientAsync
-  podsToContainersMap map[string]*hadoop_yarn.ContainerIdProto
-  handler             *yarnSchedulerCallbackHandler
+	yarnClient          *yarn_client.YarnClient
+	rmClient            *yarn_client.AMRMClientAsync
+	podsToContainersMap map[string]*hadoop_yarn.ContainerIdProto
+	handler             *yarnSchedulerCallbackHandler
 }
 
 type yarnSchedulerCallbackHandler struct {
-  completedContainers chan []*hadoop_yarn.ContainerStatusProto
-  allocatedContainers chan []*hadoop_yarn.ContainerProto
+	completedContainers chan []*hadoop_yarn.ContainerStatusProto
+	allocatedContainers chan []*hadoop_yarn.ContainerProto
 }
 
 func NewYARNScheduler() Scheduler {
-  handler := newYarnSchedulerCallbackHandler()
-  yarnC, rmC := YARNInit(handler)
-  podsToContainers := make(map[string]*hadoop_yarn.ContainerIdProto)
+	handler := newYarnSchedulerCallbackHandler()
+	yarnC, rmC := YARNInit(handler)
+	podsToContainers := make(map[string]*hadoop_yarn.ContainerIdProto)
 
-  return &YARNScheduler{
-    yarnClient:          yarnC,
-    rmClient:            rmC,
-    podsToContainersMap: podsToContainers,
-    handler:             handler}
+	return &YARNScheduler{
+		yarnClient:          yarnC,
+		rmClient:            rmC,
+		podsToContainersMap: podsToContainers,
+		handler:             handler}
 }
 
 func YARNInit(handler *yarnSchedulerCallbackHandler) (*yarn_client.YarnClient, *yarn_client.AMRMClientAsync) {
@@ -100,25 +101,25 @@ func YARNInit(handler *yarnSchedulerCallbackHandler) (*yarn_client.YarnClient, *
 		}
 	}
 
-  amRmToken := appReport.GetAmRmToken();
-  for amRmToken == nil {
-    log.Println("AMRMToken is nil. sleeping before trying again.")
-    time.Sleep(1 * time.Second)
-    appReport, err = yarnClient.GetApplicationReport(asc.ApplicationId)
-    if (err != nil) {
-      log.Println("Failed to get application report! error: ", err)
-      return nil, nil
-    }
-    amRmToken = appReport.GetAmRmToken();
-  }
+	amRmToken := appReport.GetAmRmToken()
+	for amRmToken == nil {
+		log.Println("AMRMToken is nil. sleeping before trying again.")
+		time.Sleep(1 * time.Second)
+		appReport, err = yarnClient.GetApplicationReport(asc.ApplicationId)
+		if err != nil {
+			log.Println("Failed to get application report! error: ", err)
+			return nil, nil
+		}
+		amRmToken = appReport.GetAmRmToken()
+	}
 
-  if amRmToken != nil {
-    savedAmRmToken := *amRmToken
-    service, _ := conf.GetRMSchedulerAddress()
-    savedAmRmToken.Service = &service
-    log.Println("Saving token with address: ", service)
-    security.GetCurrentUser().AddUserToken(&savedAmRmToken)
-  }
+	if amRmToken != nil {
+		savedAmRmToken := *amRmToken
+		service, _ := conf.GetRMSchedulerAddress()
+		savedAmRmToken.Service = &service
+		log.Println("Saving token with address: ", service)
+		security.GetCurrentUser().AddUserToken(&savedAmRmToken)
+	}
 
 	log.Println("Application in state ", appState)
 
@@ -158,31 +159,31 @@ func (yarnScheduler *YARNScheduler) Delete(id string) error {
 	rmClient := yarnScheduler.rmClient
 	containerId, found := yarnScheduler.podsToContainersMap[id]
 
-  if !found {
+	if !found {
 		return errors.New("attempting to delete a pod that doesn't have an associated container")
 	}
 
 	rmClient.ReleaseAssignedContainer(containerId)
 
-  const maxAttempts = int(5)
-  releaseAttempts := 0
+	const maxAttempts = int(5)
+	releaseAttempts := 0
 
-  for (releaseAttempts < maxAttempts ) {
-    select {
-    case completedContainers := <-yarnScheduler.handler.completedContainers :
-      log.Println("received container completion status: ", completedContainers[0])
-      return nil
-    case <-time.After(3 * time.Second):
-      // Sleep for a while before trying again
-      releaseAttempts++
-      log.Println("no response to release request. sleeping...")
-      time.Sleep(3 * time.Second)
-      continue
-    }
-  }
+	for releaseAttempts < maxAttempts {
+		select {
+		case completedContainers := <-yarnScheduler.handler.completedContainers:
+			log.Println("received container completion status: ", completedContainers[0])
+			return nil
+		case <-time.After(3 * time.Second):
+			// Sleep for a while before trying again
+			releaseAttempts++
+			log.Println("no response to release request. sleeping...")
+			time.Sleep(3 * time.Second)
+			continue
+		}
+	}
 
-  log.Println("failed to delete container with id: ", id)
-  return errors.New("failed to release container!")
+	log.Println("failed to delete container with id: ", id)
+	return errors.New("failed to release container!")
 }
 
 func (yarnScheduler *YARNScheduler) Schedule(pod api.Pod, minionLister MinionLister) (string, error) {
@@ -200,19 +201,19 @@ func (yarnScheduler *YARNScheduler) Schedule(pod api.Pod, minionLister MinionLis
 	rmClient.AddRequest(1, "*", &resource, numContainers)
 
 	for numAllocatedContainers < numContainers && allocationAttempts < maxAttempts {
-    var allocatedContainers []*hadoop_yarn.ContainerProto
+		var allocatedContainers []*hadoop_yarn.ContainerProto
 
-    select {
-    case allocatedContainers = <- yarnScheduler.handler.allocatedContainers :
-      break;
-    case <- time.After(3 * time.Second):
-      // Sleep for a while before trying again
-      allocationAttempts++
-      log.Println("Sleeping...")
-      time.Sleep(3 * time.Second)
-      log.Println("Sleeping... done!")
-      continue
-    }
+		select {
+		case allocatedContainers = <-yarnScheduler.handler.allocatedContainers:
+			break
+		case <-time.After(3 * time.Second):
+			// Sleep for a while before trying again
+			allocationAttempts++
+			log.Println("Sleeping...")
+			time.Sleep(3 * time.Second)
+			log.Println("Sleeping... done!")
+			continue
+		}
 
 		for _, container := range allocatedContainers {
 			allocatedContainers[numAllocatedContainers] = container
@@ -226,7 +227,6 @@ func (yarnScheduler *YARNScheduler) Schedule(pod api.Pod, minionLister MinionLis
 			//We have the hostname available. return from here.
 			return findMinionForHost(host, minionLister)
 		}
-
 
 		log.Println("#containers allocated: ", len(allocatedContainers))
 		log.Println("Total #containers allocated so far: ", numAllocatedContainers)
@@ -255,7 +255,7 @@ func findMinionForHost(host string, minionLister MinionLister) (string, error) {
 		}
 
 		for _, minion := range minions.Items {
-      minionStr := minion.ID
+			minionStr := minion.ID
 			minionIPs, err := net.LookupIP(minionStr)
 
 			if err != nil {
@@ -274,38 +274,36 @@ func findMinionForHost(host string, minionLister MinionLister) (string, error) {
 	return "<invalid_host>", errors.New("unable to find minion for YARN host: " + host)
 }
 
+func newYarnSchedulerCallbackHandler() *yarnSchedulerCallbackHandler {
+	completedContainers := make(chan []*hadoop_yarn.ContainerStatusProto, maxCallbackNotifications)
+	allocatedContainers := make(chan []*hadoop_yarn.ContainerProto, maxCallbackNotifications)
 
-func newYarnSchedulerCallbackHandler() *yarnSchedulerCallbackHandler{
-  completedContainers := make(chan []*hadoop_yarn.ContainerStatusProto, maxCallbackNotifications)
-  allocatedContainers := make(chan []*hadoop_yarn.ContainerProto, maxCallbackNotifications)
-
-  return &yarnSchedulerCallbackHandler{completedContainers: completedContainers, allocatedContainers: allocatedContainers}
+	return &yarnSchedulerCallbackHandler{completedContainers: completedContainers, allocatedContainers: allocatedContainers}
 }
 
 func (ch yarnSchedulerCallbackHandler) OnContainersCompleted(completedContainers []*hadoop_yarn.ContainerStatusProto) {
-  log.Println("received completed containers notification. writing to channel: ", completedContainers)
-  ch.completedContainers <- completedContainers
+	log.Println("received completed containers notification. writing to channel: ", completedContainers)
+	ch.completedContainers <- completedContainers
 }
-
 
 func (ch yarnSchedulerCallbackHandler) OnContainersAllocated(allocatedContainers []*hadoop_yarn.ContainerProto) {
-  log.Println("received allocated containers notification. writing to channel: ", allocatedContainers)
-  ch.allocatedContainers <- allocatedContainers
+	log.Println("received allocated containers notification. writing to channel: ", allocatedContainers)
+	ch.allocatedContainers <- allocatedContainers
 }
 
-func (ch yarnSchedulerCallbackHandler)  OnShutDownRequest() {
-  log.Println("received shutdown request!")
+func (ch yarnSchedulerCallbackHandler) OnShutDownRequest() {
+	log.Println("received shutdown request!")
 }
 
 func (ch yarnSchedulerCallbackHandler) OnNodesUpdated(updatedNodes []*hadoop_yarn.NodeReportProto) {
-  log.Println("nodes updated. this operation is not suppored. doing nothing.")
+	log.Println("nodes updated. this operation is not suppored. doing nothing.")
 }
 
 //not supported currently
 func (ch yarnSchedulerCallbackHandler) GetProgress() float64 {
-  return 0.001
+	return 0.001
 }
 
-func (ch yarnSchedulerCallbackHandler)  OnError(err error) {
-  log.Println("allocation error! error: ", err)
+func (ch yarnSchedulerCallbackHandler) OnError(err error) {
+	log.Println("allocation error! error: ", err)
 }
