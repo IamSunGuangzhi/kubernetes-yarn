@@ -23,7 +23,7 @@ $kube_os = ENV['KUBERNETES_OS'] || "fedora"
 $kube_box = {
   "fedora" => {
     "name" => "fedora20-salt-hadoop",
-    "box_url" => "http://bit.ly/fedora20-salt-hadoop-hosted"
+    "box_url" => "http://bit.ly/fedora20-salt-hadoop-hosted-s3"
   }
 }
 
