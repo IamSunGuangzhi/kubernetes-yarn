@@ -18,9 +18,12 @@ package etcd
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	etcderr "github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors/etcd"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/constraint"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/pod"
@@ -34,8 +37,7 @@ import (
 // TODO: Need to add a reconciler loop that makes sure that things in pods are reflected into
 //       kubelet (and vice versa)
 
-// Registry implements PodRegistry, ControllerRegistry and ServiceRegistry
-// with backed by etcd.
+// Registry implements PodRegistry, ControllerRegistry, ServiceRegistry and MinionRegistry, backed by etcd.
 type Registry struct {
 	tools.EtcdHelper
 	manifestFactory pod.ManifestFactory
@@ -54,6 +56,21 @@ func makePodKey(podID string) string {
 	return "/registry/pods/" + podID
 }
 
+// parseWatchResourceVersion takes a resource version argument and converts it to
+// the etcd version we should pass to helper.Watch(). Because resourceVersion is
+// an opaque value, the default watch behavior for non-zero watch is to watch
+// the next value (if you pass "1", you will see updates from "2" onwards).
+func parseWatchResourceVersion(resourceVersion, kind string) (uint64, error) {
+	if resourceVersion == "" || resourceVersion == "0" {
+		return 0, nil
+	}
+	version, err := strconv.ParseUint(resourceVersion, 10, 64)
+	if err != nil {
+		return 0, etcderr.InterpretResourceVersionError(err, kind, resourceVersion)
+	}
+	return version + 1, nil
+}
+
 // ListPods obtains a list of pods with labels that match selector.
 func (r *Registry) ListPods(ctx api.Context, selector labels.Selector) (*api.PodList, error) {
 	return r.ListPodsPredicate(ctx, func(pod *api.Pod) bool {
@@ -64,7 +81,7 @@ func (r *Registry) ListPods(ctx api.Context, selector labels.Selector) (*api.Pod
 // ListPodsPredicate obtains a list of pods that match filter.
 func (r *Registry) ListPodsPredicate(ctx api.Context, filter func(*api.Pod) bool) (*api.PodList, error) {
 	allPods := api.PodList{}
-	err := r.ExtractList("/registry/pods", &allPods.Items, &allPods.ResourceVersion)
+	err := r.ExtractToList("/registry/pods", &allPods)
 	if err != nil {
 		return nil, err
 	}
@@ -83,8 +100,12 @@ func (r *Registry) ListPodsPredicate(ctx api.Context, filter func(*api.Pod) bool
 }
 
 // WatchPods begins watching for new, changed, or deleted pods.
-func (r *Registry) WatchPods(ctx api.Context, resourceVersion uint64, filter func(*api.Pod) bool) (watch.Interface, error) {
-	return r.WatchList("/registry/pods", resourceVersion, func(obj runtime.Object) bool {
+func (r *Registry) WatchPods(ctx api.Context, resourceVersion string, filter func(*api.Pod) bool) (watch.Interface, error) {
+	version, err := parseWatchResourceVersion(resourceVersion, "pod")
+	if err != nil {
+		return nil, err
+	}
+	return r.WatchList("/registry/pods", version, func(obj runtime.Object) bool {
 		switch t := obj.(type) {
 		case *api.Pod:
 			return filter(t)
@@ -179,7 +200,44 @@ func (r *Registry) assignPod(podID string, machine string) error {
 }
 
 func (r *Registry) UpdatePod(ctx api.Context, pod *api.Pod) error {
-	return fmt.Errorf("unimplemented!")
+	var podOut api.Pod
+	podKey := makePodKey(pod.ID)
+	err := r.EtcdHelper.ExtractObj(podKey, &podOut, false)
+	if err != nil {
+		return err
+	}
+	scheduled := podOut.DesiredState.Host != ""
+	if scheduled {
+		pod.DesiredState.Host = podOut.DesiredState.Host
+		// If it's already been scheduled, limit the types of updates we'll accept.
+		errs := validation.ValidatePodUpdate(pod, &podOut)
+		if len(errs) != 0 {
+			return errors.NewInvalid("Pod", pod.ID, errs)
+		}
+	}
+	// There's no race with the scheduler, because either this write will fail because the host
+	// has been updated, or the host update will fail because this pod has been updated.
+	err = r.EtcdHelper.SetObj(podKey, pod)
+	if err != nil {
+		return err
+	}
+	if !scheduled {
+		// never scheduled, just update.
+		return nil
+	}
+	containerKey := makeContainerKey(podOut.DesiredState.Host)
+	return r.AtomicUpdate(containerKey, &api.ContainerManifestList{}, func(in runtime.Object) (runtime.Object, error) {
+		manifests := in.(*api.ContainerManifestList)
+		for ix := range manifests.Items {
+			if manifests.Items[ix].ID == pod.ID {
+				manifests.Items[ix] = pod.DesiredState.Manifest
+				return manifests, nil
+			}
+		}
+		// This really shouldn't happen
+		glog.Warningf("Couldn't find: %s in %#v", pod.ID, manifests)
+		return manifests, fmt.Errorf("Failed to update pod, couldn't find %s in %#v", pod.ID, manifests)
+	})
 }
 
 // DeletePod deletes an existing pod specified by its ID.
@@ -228,13 +286,17 @@ func (r *Registry) DeletePod(ctx api.Context, podID string) error {
 // ListControllers obtains a list of ReplicationControllers.
 func (r *Registry) ListControllers(ctx api.Context) (*api.ReplicationControllerList, error) {
 	controllers := &api.ReplicationControllerList{}
-	err := r.ExtractList("/registry/controllers", &controllers.Items, &controllers.ResourceVersion)
+	err := r.ExtractToList("/registry/controllers", controllers)
 	return controllers, err
 }
 
 // WatchControllers begins watching for new, changed, or deleted controllers.
-func (r *Registry) WatchControllers(ctx api.Context, resourceVersion uint64) (watch.Interface, error) {
-	return r.WatchList("/registry/controllers", resourceVersion, tools.Everything)
+func (r *Registry) WatchControllers(ctx api.Context, resourceVersion string) (watch.Interface, error) {
+	version, err := parseWatchResourceVersion(resourceVersion, "replicationControllers")
+	if err != nil {
+		return nil, err
+	}
+	return r.WatchList("/registry/controllers", version, tools.Everything)
 }
 
 func makeControllerKey(id string) string {
@@ -278,7 +340,7 @@ func makeServiceKey(name string) string {
 // ListServices obtains a list of Services.
 func (r *Registry) ListServices(ctx api.Context) (*api.ServiceList, error) {
 	list := &api.ServiceList{}
-	err := r.ExtractList("/registry/services/specs", &list.Items, &list.ResourceVersion)
+	err := r.ExtractToList("/registry/services/specs", list)
 	return list, err
 }
 
@@ -338,15 +400,19 @@ func (r *Registry) UpdateService(ctx api.Context, svc *api.Service) error {
 }
 
 // WatchServices begins watching for new, changed, or deleted service configurations.
-func (r *Registry) WatchServices(ctx api.Context, label, field labels.Selector, resourceVersion uint64) (watch.Interface, error) {
+func (r *Registry) WatchServices(ctx api.Context, label, field labels.Selector, resourceVersion string) (watch.Interface, error) {
+	version, err := parseWatchResourceVersion(resourceVersion, "service")
+	if err != nil {
+		return nil, err
+	}
 	if !label.Empty() {
 		return nil, fmt.Errorf("label selectors are not supported on services")
 	}
 	if value, found := field.RequiresExactMatch("ID"); found {
-		return r.Watch(makeServiceKey(value), resourceVersion), nil
+		return r.Watch(makeServiceKey(value), version), nil
 	}
 	if field.Empty() {
-		return r.WatchList("/registry/services/specs", resourceVersion, tools.Everything)
+		return r.WatchList("/registry/services/specs", version, tools.Everything)
 	}
 	return nil, fmt.Errorf("only the 'ID' and default (everything) field selectors are supported")
 }
@@ -354,7 +420,7 @@ func (r *Registry) WatchServices(ctx api.Context, label, field labels.Selector, 
 // ListEndpoints obtains a list of Services.
 func (r *Registry) ListEndpoints(ctx api.Context) (*api.EndpointsList, error) {
 	list := &api.EndpointsList{}
-	err := r.ExtractList("/registry/services/endpoints", &list.Items, &list.ResourceVersion)
+	err := r.ExtractToList("/registry/services/endpoints", list)
 	return list, err
 }
 
@@ -370,15 +436,54 @@ func (r *Registry) UpdateEndpoints(ctx api.Context, e *api.Endpoints) error {
 }
 
 // WatchEndpoints begins watching for new, changed, or deleted endpoint configurations.
-func (r *Registry) WatchEndpoints(ctx api.Context, label, field labels.Selector, resourceVersion uint64) (watch.Interface, error) {
+func (r *Registry) WatchEndpoints(ctx api.Context, label, field labels.Selector, resourceVersion string) (watch.Interface, error) {
+	version, err := parseWatchResourceVersion(resourceVersion, "endpoints")
+	if err != nil {
+		return nil, err
+	}
 	if !label.Empty() {
 		return nil, fmt.Errorf("label selectors are not supported on endpoints")
 	}
 	if value, found := field.RequiresExactMatch("ID"); found {
-		return r.Watch(makeServiceEndpointsKey(value), resourceVersion), nil
+		return r.Watch(makeServiceEndpointsKey(value), version), nil
 	}
 	if field.Empty() {
-		return r.WatchList("/registry/services/endpoints", resourceVersion, tools.Everything)
+		return r.WatchList("/registry/services/endpoints", version, tools.Everything)
 	}
 	return nil, fmt.Errorf("only the 'ID' and default (everything) field selectors are supported")
+}
+
+func makeMinionKey(minionID string) string {
+	return "/registry/minions/" + minionID
+}
+
+func (r *Registry) ListMinions(ctx api.Context) (*api.MinionList, error) {
+	minions := &api.MinionList{}
+	err := r.ExtractToList("/registry/minions", minions)
+	return minions, err
+}
+
+func (r *Registry) CreateMinion(ctx api.Context, minion *api.Minion) error {
+	// TODO: Add some validations.
+	err := r.CreateObj(makeMinionKey(minion.ID), minion, 0)
+	return etcderr.InterpretCreateError(err, "minion", minion.ID)
+}
+
+func (r *Registry) GetMinion(ctx api.Context, minionID string) (*api.Minion, error) {
+	var minion api.Minion
+	key := makeMinionKey(minionID)
+	err := r.ExtractObj(key, &minion, false)
+	if err != nil {
+		return nil, etcderr.InterpretGetError(err, "minion", minion.ID)
+	}
+	return &minion, nil
+}
+
+func (r *Registry) DeleteMinion(ctx api.Context, minionID string) error {
+	key := makeMinionKey(minionID)
+	err := r.Delete(key, true)
+	if err != nil {
+		return etcderr.InterpretDeleteError(err, "minion", minionID)
+	}
+	return nil
 }

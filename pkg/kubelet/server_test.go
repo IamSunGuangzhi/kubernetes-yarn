@@ -31,7 +31,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
-	"github.com/fsouza/go-dockerclient"
 	"github.com/google/cadvisor/info"
 )
 
@@ -87,7 +86,7 @@ func newServerTest() *serverTestFramework {
 	}
 	fw.updateReader = startReading(fw.updateChan)
 	fw.fakeKubelet = &fakeKubelet{}
-	server := NewServer(fw.fakeKubelet, fw.updateChan)
+	server := NewServer(fw.fakeKubelet, fw.updateChan, true)
 	fw.serverUnderTest = &server
 	fw.testHTTPServer = httptest.NewServer(fw.serverUnderTest)
 	return fw
@@ -147,9 +146,7 @@ func TestContainers(t *testing.T) {
 func TestPodInfo(t *testing.T) {
 	fw := newServerTest()
 	expected := api.PodInfo{
-		"goodpod": api.ContainerStatus{
-			DetailInfo: docker.Container{ID: "myContainerID"},
-		},
+		"goodpod": api.ContainerStatus{},
 	}
 	fw.fakeKubelet.infoFunc = func(name string) (api.PodInfo, error) {
 		if name == "goodpod.etcd" {
@@ -177,7 +174,8 @@ func TestPodInfo(t *testing.T) {
 func TestContainerInfo(t *testing.T) {
 	fw := newServerTest()
 	expectedInfo := &info.ContainerInfo{}
-	expectedPodID := "somepod"
+	podID := "somepod"
+	expectedPodID := "somepod" + ".etcd"
 	expectedContainerName := "goodcontainer"
 	fw.fakeKubelet.containerInfoFunc = func(podID, containerName string, req *info.ContainerInfoRequest) (*info.ContainerInfo, error) {
 		if podID != expectedPodID || containerName != expectedContainerName {
@@ -186,7 +184,7 @@ func TestContainerInfo(t *testing.T) {
 		return expectedInfo, nil
 	}
 
-	resp, err := http.Get(fw.testHTTPServer.URL + fmt.Sprintf("/stats/%v/%v", expectedPodID, expectedContainerName))
+	resp, err := http.Get(fw.testHTTPServer.URL + fmt.Sprintf("/stats/%v/%v", podID, expectedContainerName))
 	if err != nil {
 		t.Fatalf("Got error GETing: %v", err)
 	}

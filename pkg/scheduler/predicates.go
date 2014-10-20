@@ -17,9 +17,94 @@ limitations under the License.
 package scheduler
 
 import (
+	"fmt"
+
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/resources"
+	"github.com/golang/glog"
 )
+
+type NodeInfo interface {
+	GetNodeInfo(nodeID string) (*api.Minion, error)
+}
+
+type StaticNodeInfo struct {
+	*api.MinionList
+}
+
+func (nodes StaticNodeInfo) GetNodeInfo(nodeID string) (*api.Minion, error) {
+	for ix := range nodes.Items {
+		if nodes.Items[ix].ID == nodeID {
+			return &nodes.Items[ix], nil
+		}
+	}
+	return nil, fmt.Errorf("failed to find node: %s, %#v", nodeID, nodes)
+}
+
+type ClientNodeInfo struct {
+	*client.Client
+}
+
+func (nodes ClientNodeInfo) GetNodeInfo(nodeID string) (*api.Minion, error) {
+	return nodes.GetMinion(nodeID)
+}
+
+type ResourceFit struct {
+	info NodeInfo
+}
+
+type resourceRequest struct {
+	milliCPU int
+	memory   int
+}
+
+func getResourceRequest(pod *api.Pod) resourceRequest {
+	result := resourceRequest{}
+	for ix := range pod.DesiredState.Manifest.Containers {
+		result.memory += pod.DesiredState.Manifest.Containers[ix].Memory
+		result.milliCPU += pod.DesiredState.Manifest.Containers[ix].CPU
+	}
+	return result
+}
+
+// PodFitsResources calculates fit based on requested, rather than used resources
+func (r *ResourceFit) PodFitsResources(pod api.Pod, existingPods []api.Pod, node string) (bool, error) {
+	podRequest := getResourceRequest(&pod)
+	if podRequest.milliCPU == 0 && podRequest.memory == 0 {
+		// no resources requested always fits.
+		return true, nil
+	}
+	info, err := r.info.GetNodeInfo(node)
+	if err != nil {
+		return false, err
+	}
+	milliCPURequested := 0
+	memoryRequested := 0
+	for ix := range existingPods {
+		existingRequest := getResourceRequest(&existingPods[ix])
+		milliCPURequested += existingRequest.milliCPU
+		memoryRequested += existingRequest.memory
+	}
+
+	// TODO: convert to general purpose resource matching, when pods ask for resources
+	totalMilliCPU := int(resources.GetFloatResource(info.NodeResources.Capacity, resources.CPU, 0) * 1000)
+	totalMemory := resources.GetIntegerResource(info.NodeResources.Capacity, resources.Memory, 0)
+
+	fitsCPU := totalMilliCPU == 0 || (totalMilliCPU-milliCPURequested) >= podRequest.milliCPU
+	fitsMemory := totalMemory == 0 || (totalMemory-memoryRequested) >= podRequest.memory
+	glog.V(3).Infof("Calculated fit: cpu: %s, memory %s", fitsCPU, fitsMemory)
+
+	return fitsCPU && fitsMemory, nil
+}
+
+func NewResourceFitPredicate(info NodeInfo) FitPredicate {
+	fit := &ResourceFit{
+		info: info,
+	}
+	return fit.PodFitsResources
+}
 
 func PodFitsPorts(pod api.Pod, existingPods []api.Pod, node string) (bool, error) {
 	for _, scheduledPod := range existingPods {
@@ -58,7 +143,7 @@ func MapPodsToMachines(lister PodLister) (map[string][]api.Pod, error) {
 		return map[string][]api.Pod{}, err
 	}
 	for _, scheduledPod := range pods {
-		host := scheduledPod.CurrentState.Host
+		host := scheduledPod.DesiredState.Host
 		machineToPods[host] = append(machineToPods[host], scheduledPod)
 	}
 	return machineToPods, nil

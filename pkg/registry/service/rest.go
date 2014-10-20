@@ -52,6 +52,9 @@ func NewREST(registry Registry, cloud cloudprovider.Interface, machines minion.R
 
 func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan runtime.Object, error) {
 	srv := obj.(*api.Service)
+	if !api.ValidNamespace(ctx, &srv.TypeMeta) {
+		return nil, errors.NewConflict("service", srv.Namespace, fmt.Errorf("Service.Namespace does not match the provided context"))
+	}
 	if errs := validation.ValidateService(srv); len(errs) > 0 {
 		return nil, errors.NewInvalid("service", srv.ID, errs)
 	}
@@ -73,7 +76,7 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan runtime.Obje
 			if !ok {
 				return nil, fmt.Errorf("The cloud provider does not support zone enumeration.")
 			}
-			hosts, err := rs.machines.List()
+			hosts, err := rs.machines.ListMinions(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -81,7 +84,7 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan runtime.Obje
 			if err != nil {
 				return nil, err
 			}
-			err = balancer.CreateTCPLoadBalancer(srv.ID, zone.Region, srv.Port, hosts)
+			err = balancer.CreateTCPLoadBalancer(srv.ID, zone.Region, srv.Port, hostsFromMinionList(hosts))
 			if err != nil {
 				return nil, err
 			}
@@ -92,6 +95,14 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan runtime.Obje
 		}
 		return rs.registry.GetService(ctx, srv.ID)
 	}), nil
+}
+
+func hostsFromMinionList(list *api.MinionList) []string {
+	result := make([]string, len(list.Items))
+	for ix := range list.Items {
+		result[ix] = list.Items[ix].ID
+	}
+	return result
 }
 
 func (rs *REST) Delete(ctx api.Context, id string) (<-chan runtime.Object, error) {
@@ -131,7 +142,7 @@ func (rs *REST) List(ctx api.Context, label, field labels.Selector) (runtime.Obj
 
 // Watch returns Services events via a watch.Interface.
 // It implements apiserver.ResourceWatcher.
-func (rs *REST) Watch(ctx api.Context, label, field labels.Selector, resourceVersion uint64) (watch.Interface, error) {
+func (rs *REST) Watch(ctx api.Context, label, field labels.Selector, resourceVersion string) (watch.Interface, error) {
 	return rs.registry.WatchServices(ctx, label, field, resourceVersion)
 }
 
@@ -165,6 +176,9 @@ func GetServiceEnvironmentVariables(ctx api.Context, registry Registry, machine 
 
 func (rs *REST) Update(ctx api.Context, obj runtime.Object) (<-chan runtime.Object, error) {
 	srv := obj.(*api.Service)
+	if !api.ValidNamespace(ctx, &srv.TypeMeta) {
+		return nil, errors.NewConflict("service", srv.Namespace, fmt.Errorf("Service.Namespace does not match the provided context"))
+	}
 	if errs := validation.ValidateService(srv); len(errs) > 0 {
 		return nil, errors.NewInvalid("service", srv.ID, errs)
 	}
@@ -210,7 +224,7 @@ func (rs *REST) deleteExternalLoadBalancer(service *api.Service) error {
 	if err != nil {
 		return err
 	}
-	if err := balancer.DeleteTCPLoadBalancer(service.JSONBase.ID, zone.Region); err != nil {
+	if err := balancer.DeleteTCPLoadBalancer(service.TypeMeta.ID, zone.Region); err != nil {
 		return err
 	}
 	return nil
@@ -222,9 +236,9 @@ func makeEnvVariableName(str string) string {
 
 func makeLinkVariables(service api.Service, machine string) []api.EnvVar {
 	prefix := makeEnvVariableName(service.ID)
-	protocol := "TCP"
+	protocol := string(api.ProtocolTCP)
 	if service.Protocol != "" {
-		protocol = service.Protocol
+		protocol = string(service.Protocol)
 	}
 	portPrefix := fmt.Sprintf("%s_PORT_%d_%s", prefix, service.Port, strings.ToUpper(protocol))
 	return []api.EnvVar{

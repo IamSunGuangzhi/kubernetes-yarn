@@ -18,10 +18,13 @@ package endpoint
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 )
 
@@ -52,18 +55,42 @@ func (rs *REST) List(ctx api.Context, label, field labels.Selector) (runtime.Obj
 
 // Watch returns Endpoint events via a watch.Interface.
 // It implements apiserver.ResourceWatcher.
-func (rs *REST) Watch(ctx api.Context, label, field labels.Selector, resourceVersion uint64) (watch.Interface, error) {
+func (rs *REST) Watch(ctx api.Context, label, field labels.Selector, resourceVersion string) (watch.Interface, error) {
 	return rs.registry.WatchEndpoints(ctx, label, field, resourceVersion)
 }
 
-// Create satisfies the RESTStorage interface but is unimplemented.
+// Create satisfies the RESTStorage interface.
 func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan runtime.Object, error) {
-	return nil, errors.New("unimplemented")
+	endpoints, ok := obj.(*api.Endpoints)
+	if !ok {
+		return nil, fmt.Errorf("not an endpoints: %#v", obj)
+	}
+	if len(endpoints.ID) == 0 {
+		return nil, fmt.Errorf("id is required: %#v", obj)
+	}
+	endpoints.CreationTimestamp = util.Now()
+	return apiserver.MakeAsync(func() (runtime.Object, error) {
+		err := rs.registry.UpdateEndpoints(ctx, endpoints)
+		if err != nil {
+			return nil, err
+		}
+		return rs.registry.GetEndpoints(ctx, endpoints.ID)
+	}), nil
 }
 
-// Update satisfies the RESTStorage interface but is unimplemented.
+// Update satisfies the RESTStorage interface.
 func (rs *REST) Update(ctx api.Context, obj runtime.Object) (<-chan runtime.Object, error) {
-	return nil, errors.New("unimplemented")
+	endpoints, ok := obj.(*api.Endpoints)
+	if !ok {
+		return nil, fmt.Errorf("not an endpoints: %#v", obj)
+	}
+	return apiserver.MakeAsync(func() (runtime.Object, error) {
+		err := rs.registry.UpdateEndpoints(ctx, endpoints)
+		if err != nil {
+			return nil, err
+		}
+		return rs.registry.GetEndpoints(ctx, endpoints.ID)
+	}), nil
 }
 
 // Delete satisfies the RESTStorage interface but is unimplemented.

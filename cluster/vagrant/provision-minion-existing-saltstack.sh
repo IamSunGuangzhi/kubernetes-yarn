@@ -16,7 +16,8 @@
 
 # exit on any error
 set -e
-source $(dirname $0)/provision-config.sh
+KUBE_ROOT=$(dirname "${BASH_SOURCE}")/../..
+source "${KUBE_ROOT}/cluster/vagrant/provision-config.sh"
 
 MINION_IP=$4
 
@@ -30,11 +31,11 @@ fi
 minion_ip_array=(${MINION_IPS//,/ })
 for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
   minion=${MINION_NAMES[$i]}
-  ip=${minion_ip_array[$i]}  
+  ip=${minion_ip_array[$i]}
   if [ ! "$(cat /etc/hosts | grep $minion)" ]; then
     echo "Adding $minion to hosts file"
     echo "$ip $minion" >> /etc/hosts
-  fi  
+  fi
 done
 
 # Let the minion know who its master is
@@ -67,4 +68,4 @@ systemctl stop salt-minion.service
 systemctl start salt-minion.service
 
 # run the networking setup
-$(dirname $0)/provision-network.sh $@
+"${KUBE_ROOT}/cluster/vagrant/provision-network.sh" $@

@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/registrytest"
 )
 
@@ -33,19 +34,20 @@ func (f *fakeClock) Now() time.Time {
 }
 
 func TestCachingHit(t *testing.T) {
+	ctx := api.NewContext()
 	fakeClock := fakeClock{
 		now: time.Unix(0, 0),
 	}
-	fakeRegistry := registrytest.NewMinionRegistry([]string{"m1", "m2"})
-	expected := []string{"m1", "m2", "m3"}
+	fakeRegistry := registrytest.NewMinionRegistry([]string{"m1", "m2"}, api.NodeResources{})
+	expected := registrytest.MakeMinionList([]string{"m1", "m2", "m3"}, api.NodeResources{})
 	cache := CachingRegistry{
 		delegate:   fakeRegistry,
 		ttl:        1 * time.Second,
 		clock:      &fakeClock,
 		lastUpdate: fakeClock.Now().Unix(),
-		minions:    expected,
+		nodes:      expected,
 	}
-	list, err := cache.List()
+	list, err := cache.ListMinions(ctx)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -55,76 +57,81 @@ func TestCachingHit(t *testing.T) {
 }
 
 func TestCachingMiss(t *testing.T) {
+	ctx := api.NewContext()
 	fakeClock := fakeClock{
 		now: time.Unix(0, 0),
 	}
-	fakeRegistry := registrytest.NewMinionRegistry([]string{"m1", "m2"})
-	expected := []string{"m1", "m2", "m3"}
+	fakeRegistry := registrytest.NewMinionRegistry([]string{"m1", "m2"}, api.NodeResources{})
+	expected := registrytest.MakeMinionList([]string{"m1", "m2", "m3"}, api.NodeResources{})
 	cache := CachingRegistry{
 		delegate:   fakeRegistry,
 		ttl:        1 * time.Second,
 		clock:      &fakeClock,
 		lastUpdate: fakeClock.Now().Unix(),
-		minions:    expected,
+		nodes:      expected,
 	}
 	fakeClock.now = time.Unix(3, 0)
-	list, err := cache.List()
+	list, err := cache.ListMinions(ctx)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	if !reflect.DeepEqual(list, fakeRegistry.Minions) {
+	if !reflect.DeepEqual(list, &fakeRegistry.Minions) {
 		t.Errorf("expected: %v, got %v", fakeRegistry.Minions, list)
 	}
 }
 
 func TestCachingInsert(t *testing.T) {
+	ctx := api.NewContext()
 	fakeClock := fakeClock{
 		now: time.Unix(0, 0),
 	}
-	fakeRegistry := registrytest.NewMinionRegistry([]string{"m1", "m2"})
-	expected := []string{"m1", "m2", "m3"}
+	fakeRegistry := registrytest.NewMinionRegistry([]string{"m1", "m2"}, api.NodeResources{})
+	expected := registrytest.MakeMinionList([]string{"m1", "m2", "m3"}, api.NodeResources{})
 	cache := CachingRegistry{
 		delegate:   fakeRegistry,
 		ttl:        1 * time.Second,
 		clock:      &fakeClock,
 		lastUpdate: fakeClock.Now().Unix(),
-		minions:    expected,
+		nodes:      expected,
 	}
-	err := cache.Insert("foo")
+	err := cache.CreateMinion(ctx, &api.Minion{
+		TypeMeta: api.TypeMeta{ID: "foo"},
+	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	list, err := cache.List()
+	list, err := cache.ListMinions(ctx)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	if !reflect.DeepEqual(list, fakeRegistry.Minions) {
+	if !reflect.DeepEqual(list, &fakeRegistry.Minions) {
 		t.Errorf("expected: %v, got %v", fakeRegistry.Minions, list)
 	}
 }
 
 func TestCachingDelete(t *testing.T) {
+	ctx := api.NewContext()
 	fakeClock := fakeClock{
 		now: time.Unix(0, 0),
 	}
-	fakeRegistry := registrytest.NewMinionRegistry([]string{"m1", "m2"})
-	expected := []string{"m1", "m2", "m3"}
+	fakeRegistry := registrytest.NewMinionRegistry([]string{"m1", "m2"}, api.NodeResources{})
+	expected := registrytest.MakeMinionList([]string{"m1", "m2", "m3"}, api.NodeResources{})
 	cache := CachingRegistry{
 		delegate:   fakeRegistry,
 		ttl:        1 * time.Second,
 		clock:      &fakeClock,
 		lastUpdate: fakeClock.Now().Unix(),
-		minions:    expected,
+		nodes:      expected,
 	}
-	err := cache.Delete("m2")
+	err := cache.DeleteMinion(ctx, "m2")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	list, err := cache.List()
+	list, err := cache.ListMinions(ctx)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	if !reflect.DeepEqual(list, fakeRegistry.Minions) {
+	if !reflect.DeepEqual(list, &fakeRegistry.Minions) {
 		t.Errorf("expected: %v, got %v", fakeRegistry.Minions, list)
 	}
 }

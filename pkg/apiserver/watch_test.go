@@ -49,7 +49,7 @@ func TestWatchWebsocket(t *testing.T) {
 	_ = ResourceWatcher(simpleStorage) // Give compile error if this doesn't work.
 	handler := Handle(map[string]RESTStorage{
 		"foo": simpleStorage,
-	}, codec, "/prefix/version")
+	}, codec, "/prefix/version", selfLinker)
 	server := httptest.NewServer(handler)
 
 	dest, _ := url.Parse(server.URL)
@@ -95,7 +95,7 @@ func TestWatchHTTP(t *testing.T) {
 	simpleStorage := &SimpleRESTStorage{}
 	handler := Handle(map[string]RESTStorage{
 		"foo": simpleStorage,
-	}, codec, "/prefix/version")
+	}, codec, "/prefix/version", selfLinker)
 	server := httptest.NewServer(handler)
 	client := http.Client{}
 
@@ -148,7 +148,7 @@ func TestWatchParamParsing(t *testing.T) {
 	simpleStorage := &SimpleRESTStorage{}
 	handler := Handle(map[string]RESTStorage{
 		"foo": simpleStorage,
-	}, codec, "/prefix/version")
+	}, codec, "/prefix/version", selfLinker)
 	server := httptest.NewServer(handler)
 
 	dest, _ := url.Parse(server.URL)
@@ -156,28 +156,28 @@ func TestWatchParamParsing(t *testing.T) {
 
 	table := []struct {
 		rawQuery        string
-		resourceVersion uint64
+		resourceVersion string
 		labelSelector   string
 		fieldSelector   string
 	}{
 		{
 			rawQuery:        "resourceVersion=1234",
-			resourceVersion: 1234,
+			resourceVersion: "1234",
 			labelSelector:   "",
 			fieldSelector:   "",
 		}, {
 			rawQuery:        "resourceVersion=314159&fields=Host%3D&labels=name%3Dfoo",
-			resourceVersion: 314159,
+			resourceVersion: "314159",
 			labelSelector:   "name=foo",
 			fieldSelector:   "Host=",
 		}, {
 			rawQuery:        "fields=ID%3dfoo&resourceVersion=1492",
-			resourceVersion: 1492,
+			resourceVersion: "1492",
 			labelSelector:   "",
 			fieldSelector:   "ID=foo",
 		}, {
 			rawQuery:        "",
-			resourceVersion: 0,
+			resourceVersion: "",
 			labelSelector:   "",
 			fieldSelector:   "",
 		},
@@ -186,7 +186,7 @@ func TestWatchParamParsing(t *testing.T) {
 	for _, item := range table {
 		simpleStorage.requestedLabelSelector = nil
 		simpleStorage.requestedFieldSelector = nil
-		simpleStorage.requestedResourceVersion = 5 // Prove this is set in all cases
+		simpleStorage.requestedResourceVersion = "5" // Prove this is set in all cases
 		dest.RawQuery = item.rawQuery
 		resp, err := http.Get(dest.String())
 		if err != nil {
@@ -210,7 +210,7 @@ func TestWatchProtocolSelection(t *testing.T) {
 	simpleStorage := &SimpleRESTStorage{}
 	handler := Handle(map[string]RESTStorage{
 		"foo": simpleStorage,
-	}, codec, "/prefix/version")
+	}, codec, "/prefix/version", selfLinker)
 	server := httptest.NewServer(handler)
 	client := http.Client{}
 

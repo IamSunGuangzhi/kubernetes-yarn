@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -206,6 +207,7 @@ func matchString(t *testing.T, pattern, str string) bool {
 
 func TestSyncPodsCreatesNetAndContainer(t *testing.T) {
 	kubelet, _, fakeDocker := newTestKubelet(t)
+	kubelet.networkContainerImage = "custom_image_name"
 	fakeDocker.ContainerList = []docker.APIContainers{}
 	err := kubelet.SyncPods([]Pod{
 		{
@@ -225,9 +227,60 @@ func TestSyncPodsCreatesNetAndContainer(t *testing.T) {
 	kubelet.drainWorkers()
 
 	verifyCalls(t, fakeDocker, []string{
-		"list", "list", "create", "start", "list", "inspect", "list", "create", "start"})
+		"list", "list", "create", "start", "list", "inspect_container", "list", "create", "start"})
 
 	fakeDocker.Lock()
+
+	found := false
+	for _, c := range fakeDocker.ContainerList {
+		if c.Image == "custom_image_name" && strings.HasPrefix(c.Names[0], "/k8s_net") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Custom net container not found: %v", fakeDocker.ContainerList)
+	}
+
+	if len(fakeDocker.Created) != 2 ||
+		!matchString(t, "k8s_net\\.[a-f0-9]+_foo.test_", fakeDocker.Created[0]) ||
+		!matchString(t, "k8s_bar\\.[a-f0-9]+_foo.test_", fakeDocker.Created[1]) {
+		t.Errorf("Unexpected containers created %v", fakeDocker.Created)
+	}
+	fakeDocker.Unlock()
+}
+
+func TestSyncPodsCreatesNetAndContainerPullsImage(t *testing.T) {
+	kubelet, _, fakeDocker := newTestKubelet(t)
+	puller := kubelet.dockerPuller.(*dockertools.FakeDockerPuller)
+	puller.HasImages = []string{}
+	kubelet.networkContainerImage = "custom_image_name"
+	fakeDocker.ContainerList = []docker.APIContainers{}
+	err := kubelet.SyncPods([]Pod{
+		{
+			Name:      "foo",
+			Namespace: "test",
+			Manifest: api.ContainerManifest{
+				ID: "foo",
+				Containers: []api.Container{
+					{Name: "bar"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	kubelet.drainWorkers()
+
+	verifyCalls(t, fakeDocker, []string{
+		"list", "list", "create", "start", "list", "inspect_container", "list", "create", "start"})
+
+	fakeDocker.Lock()
+
+	if !reflect.DeepEqual(puller.ImagesPulled, []string{"custom_image_name", ""}) {
+		t.Errorf("Unexpected pulled containers: %v", puller.ImagesPulled)
+	}
+
 	if len(fakeDocker.Created) != 2 ||
 		!matchString(t, "k8s_net\\.[a-f0-9]+_foo.test_", fakeDocker.Created[0]) ||
 		!matchString(t, "k8s_bar\\.[a-f0-9]+_foo.test_", fakeDocker.Created[1]) {
@@ -263,7 +316,7 @@ func TestSyncPodsWithNetCreatesContainer(t *testing.T) {
 	kubelet.drainWorkers()
 
 	verifyCalls(t, fakeDocker, []string{
-		"list", "list", "list", "inspect", "list", "create", "start"})
+		"list", "list", "list", "inspect_container", "list", "create", "start"})
 
 	fakeDocker.Lock()
 	if len(fakeDocker.Created) != 1 ||
@@ -313,7 +366,7 @@ func TestSyncPodsWithNetCreatesContainerCallsHandler(t *testing.T) {
 	kubelet.drainWorkers()
 
 	verifyCalls(t, fakeDocker, []string{
-		"list", "list", "list", "inspect", "list", "create", "start"})
+		"list", "list", "list", "inspect_container", "list", "create", "start"})
 
 	fakeDocker.Lock()
 	if len(fakeDocker.Created) != 1 ||
@@ -353,7 +406,7 @@ func TestSyncPodsDeletesWithNoNetContainer(t *testing.T) {
 	kubelet.drainWorkers()
 
 	verifyCalls(t, fakeDocker, []string{
-		"list", "list", "stop", "create", "start", "list", "list", "inspect", "list", "create", "start"})
+		"list", "list", "stop", "create", "start", "list", "list", "inspect_container", "list", "create", "start"})
 
 	// A map iteration is used to delete containers, so must not depend on
 	// order here.
@@ -453,8 +506,12 @@ func TestSyncPodDeletesDuplicate(t *testing.T) {
 
 type FalseHealthChecker struct{}
 
-func (f *FalseHealthChecker) HealthCheck(podFullName string, state api.PodState, container api.Container) (health.Status, error) {
+func (f *FalseHealthChecker) HealthCheck(podFullName, podUUID string, state api.PodState, container api.Container) (health.Status, error) {
 	return health.Unhealthy, nil
+}
+
+func (f *FalseHealthChecker) CanCheck(probe *api.LivenessProbe) bool {
+	return true
 }
 
 func TestSyncPodBadHash(t *testing.T) {
@@ -522,8 +579,7 @@ func TestSyncPodUnhealthy(t *testing.T) {
 			Containers: []api.Container{
 				{Name: "bar",
 					LivenessProbe: &api.LivenessProbe{
-						// Always returns healthy == false
-						Type: "false",
+					// Always returns healthy == false
 					},
 				},
 			},
@@ -578,14 +634,14 @@ func TestMountExternalVolumes(t *testing.T) {
 			{
 				Name: "host-dir",
 				Source: &api.VolumeSource{
-					HostDirectory: &api.HostDirectory{"/dir/path"},
+					HostDir: &api.HostDir{"/dir/path"},
 				},
 			},
 		},
 	}
 	podVolumes, _ := kubelet.mountExternalVolumes(&manifest)
 	expectedPodVolumes := make(volumeMap)
-	expectedPodVolumes["host-dir"] = &volume.HostDirectory{"/dir/path"}
+	expectedPodVolumes["host-dir"] = &volume.HostDir{"/dir/path"}
 	if len(expectedPodVolumes) != len(podVolumes) {
 		t.Errorf("Unexpected volumes. Expected %#v got %#v.  Manifest was: %#v", expectedPodVolumes, podVolumes, manifest)
 	}
@@ -628,9 +684,9 @@ func TestMakeVolumesAndBinds(t *testing.T) {
 	}
 
 	podVolumes := volumeMap{
-		"disk":  &volume.HostDirectory{"/mnt/disk"},
-		"disk4": &volume.HostDirectory{"/mnt/host"},
-		"disk5": &volume.EmptyDirectory{"disk5", "podID", "/var/lib/kubelet"},
+		"disk":  &volume.HostDir{"/mnt/disk"},
+		"disk4": &volume.HostDir{"/mnt/host"},
+		"disk5": &volume.EmptyDir{"disk5", "podID", "/var/lib/kubelet"},
 	}
 
 	binds := makeBinds(&pod, &container, podVolumes)
