@@ -44,4 +44,4 @@ kube::build::copy_output
 kube::build::run_image
 kube::release::package_tarballs
 
-kube::release::${KUBERNETES_PROVIDER-gce}::release
+kube::release::gcs::release
