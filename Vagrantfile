@@ -24,8 +24,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   # OS platform to box information
   kube_box = {
     "fedora" => {
-      "name" => "fedora20-salt-hadoop",
-     "box_url" => "http://bit.ly/fedora20-salt-hadoop-hosted"
+      "name" => "fedora20-salt-hadoop-s3",
+     "box_url" => "http://bit.ly/fedora20-salt-hadoop-hosted-s3"
     }
   }
 

@@ -19,6 +19,7 @@ $ mkdir -p $GOPATH/src/github.com/hortonworks/
 $ cd $GOPATH/src/github.com/hortonworks/
 $ git clone git@github.com:hortonworks/kubernetes-yarn.git
 $ cd kubernetes-yarn
+$ git checkout vagrant-demo-branch
 $ hack/build-go.sh
 $ vagrant up
 ```
