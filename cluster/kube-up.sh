@@ -21,6 +21,8 @@
 # the defaults in the release config.
 
 # exit on any error
+export KUBERNETES_PROVIDER=vagrant
+
 set -e
 
 source $(dirname $0)/kube-env.sh
