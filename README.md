@@ -1,6 +1,6 @@
 # Kubernetes-YARN
 
-A fork of [Kubernetes](https://github.com/GoogleCloudPlatform/kubernetes) using [Apache Hadoop YARN](http://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/YARN.html) as the scheduler. Integrating Kubernetes with YARN lets users run [Docker](https://www.docker.com/whatisdocker/) containers packaged as pods (using Kubernetes) and YARN applications (using YARN), while ensuring common resource management across these (PaaS and data) workloads. 
+A version of [Kubernetes](https://github.com/GoogleCloudPlatform/kubernetes) using [Apache Hadoop YARN](http://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/YARN.html) as the scheduler. Integrating Kubernetes with YARN lets users run [Docker](https://www.docker.com/whatisdocker/) containers packaged as pods (using Kubernetes) and YARN applications (using YARN), while ensuring common resource management across these (PaaS and data) workloads. 
 
 ## Kubernetes-YARN is currently in the protoype/alpha phase
 This integration is under development. Please expect bugs and significant changes as we work towards making things more stable and adding additional features.
