@@ -35,6 +35,17 @@ for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
   if [ ! "$(cat /etc/hosts | grep $minion)" ]; then
     echo "Adding $minion to hosts file"
     echo "$ip $minion" >> /etc/hosts
+  else
+    host_entry=$(cat /etc/hosts | grep $minion)
+    ip_in_file=$(echo $host_entry | awk '{print $1}')
+    echo "existing host entry is \"$host_entry\""
+    echo "ip is \"$ip_in_file\""
+    if [ "$ip_in_file" == "127.0.0.1" ]; then
+      echo "$minion has a 127.0.0.1 entry - fixing." 
+      sed -i "s/127\.0\.0\.1.*/127.0.0.1 localhost/g" /etc/hosts
+      echo "Adding $minion to hosts file"
+      echo "$ip $minion" >> /etc/hosts
+    fi
   fi
 done
 
@@ -59,7 +70,7 @@ EOF
 echo "Installing hadoop ..."
 pushd /vagrant/cluster/vagrant
 ./provision-hadoop-existing-hadoop.sh $MASTER_IP $MINION_IPS
-./restart-yarn-nm.sh
+./restart-hadoop-slave-daemons.sh
 popd
 
 #enable/stop/start salt-minion

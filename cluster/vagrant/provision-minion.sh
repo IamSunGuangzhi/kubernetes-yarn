@@ -59,7 +59,7 @@ EOF
 echo "Installing hadoop ..."
 pushd /vagrant/cluster/vagrant
 ./provision-hadoop.sh $MASTER_IP $MINION_IPS
-./restart-yarn-nm.sh
+./restart-hadoop-slave-daemons.sh
 popd
 
 

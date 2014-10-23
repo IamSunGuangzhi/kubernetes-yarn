@@ -24,6 +24,9 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
+#kubernetes-yarn only supports vagrant for the time being. 
+export KUBERNETES_PROVIDER=vagrant
+
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
 source "${KUBE_ROOT}/cluster/kube-env.sh"
 source "${KUBE_ROOT}/cluster/${KUBERNETES_PROVIDER}/util.sh"

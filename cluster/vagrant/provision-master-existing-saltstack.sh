@@ -106,7 +106,7 @@ echo $MASTER_HTPASSWD > /srv/salt-overlay/salt/nginx/htpasswd
 echo "Installing hadoop ..."
 pushd /vagrant/cluster/vagrant
 ./provision-hadoop-existing-hadoop.sh $MASTER_IP $MINION_IPS
-./restart-yarn-rm.sh
+./restart-hadoop-master-daemons.sh
 popd
 
 echo "Running release install script"

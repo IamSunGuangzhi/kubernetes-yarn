@@ -116,7 +116,7 @@ popd
 echo "Installing hadoop ..."
 pushd /vagrant/cluster/vagrant
 ./provision-hadoop.sh $MASTER_IP $MINION_IPS
-./restart-yarn-rm.sh
+./restart-hadoop-master-daemons.sh
 popd
 
 # we will run provision to update code each time we test, so we do not want to do salt installs each time

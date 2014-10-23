@@ -15,7 +15,7 @@ HADOOP_ARCHIVE_DIR=./hadoop
 HADOOP_ARCHIVE=${HADOOP_ARCHIVE_DIR}/hadoop-2.6.0-SNAPSHOT.tgz
 YARN_SITE=${HADOOP_HOME}/etc/hadoop/yarn-site.xml
 SLAVES=${HADOOP_HOME}/etc/hadoop/slaves
-
+MR_SCRIPT=test-pi-yarn.sh
 
 echo "creating hadoop environment script... "
 cat <<EOF > ${ENV_CONFIG}
@@ -34,5 +34,8 @@ sed -i "s/__YARN_RESOURCE_MANAGER_IP__/${MASTER_IP}/g" ${YARN_SITE}
 echo "setting up slaves file .. "
 echo "slaves list : ${MINION_IPS}"
 echo ${MINION_IPS} | sed "s/,/\n/g" > ${SLAVES}
+
+echo "copying test map reduce script .. "
+cp ${MR_SCRIPT} ${HADOOP_HOME}
 
 echo "done installing hadoop environment"

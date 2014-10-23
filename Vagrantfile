@@ -12,8 +12,8 @@ $num_minion = (ENV['KUBERNETES_NUM_MINIONS'] || 3).to_i
 
 # ip configuration
 $master_ip = "10.245.1.2"
-$minion_ip_base = "10.245.2."
-$minion_ips = $num_minion.times.collect { |n| $minion_ip_base + "#{n+2}" }
+$minion_ip_base = "10.245.1."
+$minion_ips = $num_minion.times.collect { |n| $minion_ip_base + "#{n+3}" }
 $minion_ips_str = $minion_ips.join(",")
 
 # Determine the OS platform to use
@@ -22,7 +22,7 @@ $kube_os = ENV['KUBERNETES_OS'] || "fedora"
 # OS platform to box information
 $kube_box = {
   "fedora" => {
-    "name" => "fedora20-salt-hadoop",
+    "name" => "fedora20-salt-hadoop-s3",
     "box_url" => "http://bit.ly/fedora20-salt-hadoop-hosted-s3"
   }
 }
@@ -38,8 +38,8 @@ else # sorry Windows folks, I can't help you
   $vm_cpus = 2
 end
 
-# Give VM 512MB of RAM
-$vm_mem = 512
+# Give VM 1024MB of RAM
+$vm_mem = 1024 
 
 
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
@@ -64,7 +64,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     config.vm.provision "shell", inline: "/vagrant/cluster/vagrant/provision-master-existing-saltstack.sh #{$master_ip} #{$num_minion} #{$minion_ips_str}"
     config.vm.network "private_network", ip: "#{$master_ip}"
     config.vm.hostname = "kubernetes-master"
-    config.vm.post_up_message = "completed provisioning master."
+    config.vm.post_up_message = "Completed provisioning master. It may take some time for salt provisioning to finish."
   end
 
   # Kubernetes minion
@@ -77,7 +77,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       minion.vm.provision "shell", inline: "/vagrant/cluster/vagrant/provision-minion-existing-saltstack.sh #{$master_ip} #{$num_minion} #{$minion_ips_str} #{minion_ip} #{minion_index}"
       minion.vm.network "private_network", ip: "#{minion_ip}"
       minion.vm.hostname = "kubernetes-minion-#{minion_index}"
-      minion.vm.post_up_message = sprintf("completed provisioning minion-%d", n+1)
+      minion.vm.post_up_message = sprintf("Completed provisioning minion-%d. It may take some time for salt provisioning to finish.", n+1)
     end
   end
 
