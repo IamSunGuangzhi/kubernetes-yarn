@@ -26,8 +26,11 @@ $ hack/build-go.sh #builds kubernetes client binaries
 $ cluster/kube-up.sh #brings up kubernetes cluster
 ```
 Following these steps will bring up a multi-VM cluster (1 master and 3 minions, by default) running Kubernetes and YARN. Please note that, depending on your local hardware and available bandwidth, bringing the cluster up could take a while to complete.
-### YARN Resource Manager UI
-By default, the kubernetes master is assigned the IP 10.245.1.2. The YARN resource manager runs on the name host. Once the vagrant cluster is running, the YARN UI is accessible at http://10.245.1.2:8088/cluster/apps
+### YARN Dashboard
+By default, the kubernetes master is assigned the IP 10.245.1.2. The YARN resource manager runs on the name host. Once the vagrant cluster is running, the YARN dashboard accessible at http://10.245.1.2:8088/
+
+### HDFS Dashboard
+The HDFS dashboard is accessible at http://10.245.1.2:50070/
 
 ### Interacting with the Kubernetes cluster
 For instructions on creating pods, running containers and other interactions with the Kubernetes cluster, please see Kubernetes' vagrant instructions [here](https://github.com/GoogleCloudPlatform/kubernetes/blob/master/docs/getting-started-guides/vagrant.md#running-containers)
