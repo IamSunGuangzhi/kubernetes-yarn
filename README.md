@@ -10,17 +10,16 @@ This integration is under development. Please expect bugs and significant change
 ### Dev Environment
 Kubernetes and Kubernetes-YARN are written in [Go](http://golang.org). Currently, only a [vagrant](http://www.vagrantup.com/)-based setup is supported. That said, bringing up a vagrant-based Kubernetes-YARN environment is fairly easy. 
 
-Please ensure you have [boot2docker](http://boot2docker.io/), Go (at least 1.3), Vagrant (at least 1.6), VirtualBox (at least 4.3.x) and git installed. 
+Please ensure you have [boot2docker](http://boot2docker.io/), Go (at least 1.3), Vagrant (at least 1.6), VirtualBox (at least 4.3.x) and git installed. Run boot2docker to bring up a docker daemon running in a tiny VM (this is used for building linux release binaries for Kubernetes). 
 
 ```
-$ boot2docker init && boot2docker start
+$ $(boot2docker shellinit) #sets up docker env vars
 $ echo $GOPATH
 /home/user/goproj
 $ mkdir -p $GOPATH/src/github.com/hortonworks/
 $ cd $GOPATH/src/github.com/hortonworks/
 $ git clone git@github.com:hortonworks/kubernetes-yarn.git
 $ cd kubernetes-yarn
-$ export DOCKER_HOST=tcp://$(/usr/local/bin/boot2docker ip 2>/dev/null):2375 #provides docker daemon location for release builds
 $ build/release.sh #builds kubernetes release binaries 
 $ hack/build-go.sh #builds kubernetes client binaries
 $ cluster/kube-up.sh #brings up kubernetes cluster
