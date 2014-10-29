@@ -23,7 +23,6 @@ $ git checkout vagrant-demo-branch
 $ hack/build-go.sh
 $ cluster/kube-up.sh 
 ```
-
 Following these steps will bring up a multi-VM cluster (1 master and 3 minions, by default) running Kubernetes and YARN. Please note that, depending on your local hardware and available bandwidth, bringing the cluster up could take a while to complete.
 ### YARN Resource Manager UI
 By default, the kubernetes master is assigned the IP 10.245.1.2. The YARN resource manager runs on the name host. Once the vagrant cluster is running, the YARN UI is accessible at http://10.245.1.2:8088/cluster/apps
