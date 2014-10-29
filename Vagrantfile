@@ -10,7 +10,7 @@ Vagrant.require_version ">= 1.6.2"
 # The number of minions to provision
 $num_minion = (ENV['KUBERNETES_NUM_MINIONS'] || 3).to_i
 
-# ip configuration
+# ip configuration - also specified in cluster/vagrant/config-default.sh
 $master_ip = "10.245.1.2"
 $minion_ip_base = "10.245.1."
 $minion_ips = $num_minion.times.collect { |n| $minion_ip_base + "#{n+3}" }
