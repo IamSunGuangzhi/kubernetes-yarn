@@ -32,5 +32,16 @@ By default, the kubernetes master is assigned the IP 10.245.1.2. The YARN resour
 ### HDFS Dashboard
 The HDFS dashboard is accessible at http://10.245.1.2:50070/
 
-### Interacting with the Kubernetes cluster
-For instructions on creating pods, running containers and other interactions with the Kubernetes cluster, please see Kubernetes' vagrant instructions [here](https://github.com/GoogleCloudPlatform/kubernetes/blob/master/docs/getting-started-guides/vagrant.md#running-containers)
+## Interacting with the Kubernetes-YARN cluster
+### Creating pods/running Docker containters
+For instructions on creating pods, running containers and other interactions with the cluster, please see Kubernetes' vagrant instructions [here](https://github.com/GoogleCloudPlatform/kubernetes/blob/master/docs/getting-started-guides/vagrant.md#running-containers)
+
+### Running a test map-reduce job
+In order to run a test map-reduce job, log into the cluster (ensure that you are in the `kubernetes-yarn` directory) and run the included test script.
+
+```
+$ vagrant ssh master
+[vagrant@kubernetes-master ~]$ cd hadoop/install/hadoop-2.6.0-SNAPSHOT/
+[vagrant@kubernetes-master hadoop-2.6.0-SNAPSHOT]$ sudo su #you need to be root to run this test script
+[root@kubernetes-master hadoop-2.6.0-SNAPSHOT]# ./test-pi-yarn.sh
+```
