@@ -92,7 +92,7 @@ func (factory *ConfigFactory) Create() *scheduler.Config {
 			glog.V(0).Infof("About to try and schedule pod %v\n"+
 				"\tknown minions: %v\n"+
 				"\tknown scheduled pods: %v\n",
-				pod.ID, minionCache.Contains(), podCache.Contains())
+				pod.Name, minionCache.ContainedIDs(), podCache.ContainedIDs())
 			return pod
 		},
 		Error: factory.makeDefaultErrorFunc(&podBackoff, podQueue),
@@ -173,23 +173,24 @@ func (factory *ConfigFactory) pollMinions() (cache.Enumerator, error) {
 
 func (factory *ConfigFactory) makeDefaultErrorFunc(backoff *podBackoff, podQueue *cache.FIFO) func(pod *api.Pod, err error) {
 	return func(pod *api.Pod, err error) {
-		glog.Errorf("Error scheduling %v: %v; retrying", pod.ID, err)
+		glog.Errorf("Error scheduling %v: %v; retrying", pod.Name, err)
 		backoff.gc()
 		// Retry asynchronously.
 		// Note that this is extremely rudimentary and we need a more real error handling path.
 		go func() {
 			defer util.HandleCrash()
-			podID := pod.ID
+			podID := pod.Name
+			podNamespace := pod.Namespace
 			backoff.wait(podID)
 			// Get the pod again; it may have changed/been scheduled already.
 			pod = &api.Pod{}
-			err := factory.Client.Get().Path("pods").Path(podID).Do().Into(pod)
+			err := factory.Client.Get().Namespace(podNamespace).Path("pods").Path(podID).Do().Into(pod)
 			if err != nil {
 				glog.Errorf("Error getting pod %v for retry: %v; abandoning", podID, err)
 				return
 			}
 			if pod.DesiredState.Host == "" {
-				podQueue.Add(pod.ID, pod)
+				podQueue.Add(pod.Name, pod)
 			}
 		}()
 	}
@@ -212,7 +213,7 @@ func (s *storeToMinionLister) GetNodeInfo(id string) (*api.Minion, error) {
 	if minion, ok := s.Get(id); ok {
 		return minion.(*api.Minion), nil
 	}
-	return nil, fmt.Errorf("minion '%v' is not in cache")
+	return nil, fmt.Errorf("minion '%v' is not in cache", id)
 }
 
 // storeToPodLister turns a store into a pod lister. The store must contain (only) pods.
@@ -245,7 +246,7 @@ func (me *minionEnumerator) Len() int {
 
 // Get returns the item (and ID) with the particular index.
 func (me *minionEnumerator) Get(index int) (string, interface{}) {
-	return me.Items[index].ID, &me.Items[index]
+	return me.Items[index].Name, &me.Items[index]
 }
 
 type binder struct {
@@ -255,7 +256,8 @@ type binder struct {
 // Bind just does a POST binding RPC.
 func (b *binder) Bind(binding *api.Binding) error {
 	glog.V(2).Infof("Attempting to bind %v to %v", binding.PodID, binding.Host)
-	return b.Post().Path("bindings").Body(binding).Do().Error()
+	ctx := api.WithNamespace(api.NewContext(), binding.Namespace)
+	return b.Post().Namespace(api.Namespace(ctx)).Path("bindings").Body(binding).Do().Error()
 }
 
 type clock interface {

@@ -1,6 +1,8 @@
 # CoreOS Quick Start Guide
 
-The following steps will setup a single node Kubernetes cluster. For a more robust setup using cloud-config see the [Installation Guide](docs/installation.md).
+The following steps will setup a single node Kubernetes cluster. For a more robust setup using cloud-config see the 
+[Installation Guide](coreos_cloud_config.md) which automates the entire set-up. Those not installing via cloud-config 
+need to define the required network configuration from in the [Network Guide](networking.md).
 
 ### Install Kubernetes binaries
 
@@ -20,11 +22,11 @@ sudo cp kubernetes/docs/getting-started-guides/coreos/units/* /etc/systemd/syste
 ### Start the Kubernetes services
 
 ```
-sudo systemctl start apiserver
-sudo systemctl start scheduler
-sudo systemctl start controller-manager
+sudo systemctl start kube-apiserver
+sudo systemctl start kube-scheduler
+sudo systemctl start kube-controller-manager
 sudo systemctl start kubelet
-sudo systemctl start proxy
+sudo systemctl start kube-proxy
 ```
 
 ### Running commands remotely

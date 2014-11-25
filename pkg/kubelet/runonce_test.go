@@ -69,12 +69,12 @@ func TestRunOnce(t *testing.T) {
 	kb := &Kubelet{}
 	podContainers := []docker.APIContainers{
 		{
-			Names:  []string{"/k8s_bar." + strconv.FormatUint(dockertools.HashContainer(&api.Container{Name: "bar"}), 16) + "_foo.test"},
+			Names:  []string{"/k8s_bar." + strconv.FormatUint(dockertools.HashContainer(&api.Container{Name: "bar"}), 16) + "_foo.new.test"},
 			ID:     "1234",
 			Status: "running",
 		},
 		{
-			Names:  []string{"/k8s_net_foo.test_"},
+			Names:  []string{"/k8s_net_foo.new.test_"},
 			ID:     "9876",
 			Status: "running",
 		},
@@ -106,12 +106,14 @@ func TestRunOnce(t *testing.T) {
 		t: t,
 	}
 	kb.dockerPuller = &dockertools.FakeDockerPuller{}
-	results, err := kb.runOnce([]Pod{
+	results, err := kb.runOnce([]api.BoundPod{
 		{
-			Name:      "foo",
-			Namespace: "test",
-			Manifest: api.ContainerManifest{
-				ID: "foo",
+			ObjectMeta: api.ObjectMeta{
+				Name:        "foo",
+				Namespace:   "new",
+				Annotations: map[string]string{ConfigSourceAnnotationKey: "test"},
+			},
+			Spec: api.PodSpec{
 				Containers: []api.Container{
 					{Name: "bar"},
 				},

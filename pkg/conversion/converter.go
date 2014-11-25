@@ -213,17 +213,16 @@ func (f FieldMatchingFlags) IsSet(flag FieldMatchingFlags) bool {
 // it is not used by Convert() other than storing it in the scope.
 // Not safe for objects with cyclic references!
 func (c *Converter) Convert(src, dest interface{}, flags FieldMatchingFlags, meta *Meta) error {
-	dv, sv := reflect.ValueOf(dest), reflect.ValueOf(src)
-	if dv.Kind() != reflect.Ptr {
-		return fmt.Errorf("Need pointer, but got %#v", dest)
+	dv, err := EnforcePtr(dest)
+	if err != nil {
+		return err
 	}
-	if sv.Kind() != reflect.Ptr {
-		return fmt.Errorf("Need pointer, but got %#v", src)
-	}
-	dv = dv.Elem()
-	sv = sv.Elem()
 	if !dv.CanAddr() {
 		return fmt.Errorf("Can't write to dest")
+	}
+	sv, err := EnforcePtr(src)
+	if err != nil {
+		return err
 	}
 	s := &scope{
 		converter: c,
@@ -244,7 +243,7 @@ func (c *Converter) convert(sv, dv reflect.Value, scope *scope) error {
 		}
 		args := []reflect.Value{sv.Addr(), dv.Addr(), reflect.ValueOf(scope)}
 		ret := fv.Call(args)[0].Interface()
-		// This convolution is necssary because nil interfaces won't convert
+		// This convolution is necessary because nil interfaces won't convert
 		// to errors.
 		if ret == nil {
 			return nil

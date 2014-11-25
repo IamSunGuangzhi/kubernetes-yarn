@@ -30,14 +30,12 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 )
 
-func newPodList(count int) api.PodList {
+func newPodList(count int) *api.PodList {
 	pods := []api.Pod{}
 	for i := 0; i < count; i++ {
 		pods = append(pods, api.Pod{
-			TypeMeta: api.TypeMeta{
-				ID:         fmt.Sprintf("pod%d", i),
-				APIVersion: testapi.Version(),
-			},
+			TypeMeta:   api.TypeMeta{APIVersion: testapi.Version()},
+			ObjectMeta: api.ObjectMeta{Name: fmt.Sprintf("pod%d", i)},
 			DesiredState: api.PodState{
 				Manifest: api.ContainerManifest{
 					Containers: []api.Container{
@@ -56,7 +54,7 @@ func newPodList(count int) api.PodList {
 			},
 		})
 	}
-	return api.PodList{
+	return &api.PodList{
 		TypeMeta: api.TypeMeta{APIVersion: testapi.Version(), Kind: "PodList"},
 		Items:    pods,
 	}
@@ -81,45 +79,86 @@ func TestFindPort(t *testing.T) {
 			},
 		},
 	}
-	port, err := findPort(&manifest, util.IntOrString{Kind: util.IntstrString, StrVal: "foo"})
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
+	emptyPortsManifest := api.ContainerManifest{
+		Containers: []api.Container{
+			{
+				Ports: []api.Port{},
+			},
+		},
 	}
-	if port != 8080 {
-		t.Errorf("Expected 8080, Got %d", port)
+	tests := []struct {
+		manifest api.ContainerManifest
+		portName util.IntOrString
+
+		wport int
+		werr  bool
+	}{
+		{
+			manifest,
+			util.IntOrString{Kind: util.IntstrString, StrVal: "foo"},
+			8080,
+			false,
+		},
+		{
+			manifest,
+			util.IntOrString{Kind: util.IntstrString, StrVal: "bar"},
+			8000,
+			false,
+		},
+		{
+			manifest,
+			util.IntOrString{Kind: util.IntstrInt, IntVal: 8000},
+			8000,
+			false,
+		},
+		{
+			manifest,
+			util.IntOrString{Kind: util.IntstrInt, IntVal: 7000},
+			7000,
+			false,
+		},
+		{
+			manifest,
+			util.IntOrString{Kind: util.IntstrString, StrVal: "baz"},
+			0,
+			true,
+		},
+		{
+			manifest,
+			util.IntOrString{Kind: util.IntstrString, StrVal: ""},
+			8080,
+			false,
+		},
+		{
+			manifest,
+			util.IntOrString{Kind: util.IntstrInt, IntVal: 0},
+			8080,
+			false,
+		},
+		{
+			emptyPortsManifest,
+			util.IntOrString{Kind: util.IntstrString, StrVal: ""},
+			0,
+			true,
+		},
+		{
+			emptyPortsManifest,
+			util.IntOrString{Kind: util.IntstrInt, IntVal: 0},
+			0,
+			true,
+		},
 	}
-	port, err = findPort(&manifest, util.IntOrString{Kind: util.IntstrString, StrVal: "bar"})
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	if port != 8000 {
-		t.Errorf("Expected 8000, Got %d", port)
-	}
-	port, err = findPort(&manifest, util.IntOrString{Kind: util.IntstrInt, IntVal: 8000})
-	if port != 8000 {
-		t.Errorf("Expected 8000, Got %d", port)
-	}
-	port, err = findPort(&manifest, util.IntOrString{Kind: util.IntstrInt, IntVal: 7000})
-	if port != 7000 {
-		t.Errorf("Expected 7000, Got %d", port)
-	}
-	port, err = findPort(&manifest, util.IntOrString{Kind: util.IntstrString, StrVal: "baz"})
-	if err == nil {
-		t.Error("unexpected non-error")
-	}
-	port, err = findPort(&manifest, util.IntOrString{Kind: util.IntstrString, StrVal: ""})
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	if port != 8080 {
-		t.Errorf("Expected 8080, Got %d", port)
-	}
-	port, err = findPort(&manifest, util.IntOrString{})
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	if port != 8080 {
-		t.Errorf("Expected 8080, Got %d", port)
+	for _, test := range tests {
+		port, err := findPort(&test.manifest, test.portName)
+		if port != test.wport {
+			t.Errorf("Expected port %d, Got %d", test.wport, port)
+		}
+		if err == nil && test.werr {
+			t.Errorf("unexpected non-error")
+		}
+		if err != nil && test.werr == false {
+			t.Errorf("unexpected error: %v", err)
+		}
 	}
 }
 
@@ -131,15 +170,15 @@ type serverResponse struct {
 func makeTestServer(t *testing.T, podResponse serverResponse, serviceResponse serverResponse, endpointsResponse serverResponse) (*httptest.Server, *util.FakeHandler) {
 	fakePodHandler := util.FakeHandler{
 		StatusCode:   podResponse.statusCode,
-		ResponseBody: util.EncodeJSON(podResponse.obj),
+		ResponseBody: runtime.EncodeOrDie(testapi.Codec(), podResponse.obj.(runtime.Object)),
 	}
 	fakeServiceHandler := util.FakeHandler{
 		StatusCode:   serviceResponse.statusCode,
-		ResponseBody: util.EncodeJSON(serviceResponse.obj),
+		ResponseBody: runtime.EncodeOrDie(testapi.Codec(), serviceResponse.obj.(runtime.Object)),
 	}
 	fakeEndpointsHandler := util.FakeHandler{
 		StatusCode:   endpointsResponse.statusCode,
-		ResponseBody: util.EncodeJSON(endpointsResponse.obj),
+		ResponseBody: runtime.EncodeOrDie(testapi.Codec(), endpointsResponse.obj.(runtime.Object)),
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/api/"+testapi.Version()+"/pods", &fakePodHandler)
@@ -156,8 +195,9 @@ func makeTestServer(t *testing.T, podResponse serverResponse, serviceResponse se
 func TestSyncEndpointsEmpty(t *testing.T) {
 	testServer, _ := makeTestServer(t,
 		serverResponse{http.StatusOK, newPodList(0)},
-		serverResponse{http.StatusOK, api.ServiceList{}},
-		serverResponse{http.StatusOK, api.Endpoints{}})
+		serverResponse{http.StatusOK, &api.ServiceList{}},
+		serverResponse{http.StatusOK, &api.Endpoints{}})
+	defer testServer.Close()
 	client := client.NewOrDie(&client.Config{Host: testServer.URL, Version: testapi.Version()})
 	endpoints := NewEndpointController(client)
 	if err := endpoints.SyncServiceEndpoints(); err != nil {
@@ -168,8 +208,9 @@ func TestSyncEndpointsEmpty(t *testing.T) {
 func TestSyncEndpointsError(t *testing.T) {
 	testServer, _ := makeTestServer(t,
 		serverResponse{http.StatusOK, newPodList(0)},
-		serverResponse{http.StatusInternalServerError, api.ServiceList{}},
-		serverResponse{http.StatusOK, api.Endpoints{}})
+		serverResponse{http.StatusInternalServerError, &api.ServiceList{}},
+		serverResponse{http.StatusOK, &api.Endpoints{}})
+	defer testServer.Close()
 	client := client.NewOrDie(&client.Config{Host: testServer.URL, Version: testapi.Version()})
 	endpoints := NewEndpointController(client)
 	if err := endpoints.SyncServiceEndpoints(); err == nil {
@@ -181,31 +222,34 @@ func TestSyncEndpointsItemsPreexisting(t *testing.T) {
 	serviceList := api.ServiceList{
 		Items: []api.Service{
 			{
-				TypeMeta: api.TypeMeta{ID: "foo"},
-				Selector: map[string]string{
-					"foo": "bar",
+				ObjectMeta: api.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector: map[string]string{
+						"foo": "bar",
+					},
 				},
 			},
 		},
 	}
 	testServer, endpointsHandler := makeTestServer(t,
 		serverResponse{http.StatusOK, newPodList(1)},
-		serverResponse{http.StatusOK, serviceList},
-		serverResponse{http.StatusOK, api.Endpoints{
-			TypeMeta: api.TypeMeta{
-				ID:              "foo",
+		serverResponse{http.StatusOK, &serviceList},
+		serverResponse{http.StatusOK, &api.Endpoints{
+			ObjectMeta: api.ObjectMeta{
+				Name:            "foo",
 				ResourceVersion: "1",
 			},
 			Endpoints: []string{"6.7.8.9:1000"},
 		}})
+	defer testServer.Close()
 	client := client.NewOrDie(&client.Config{Host: testServer.URL, Version: testapi.Version()})
 	endpoints := NewEndpointController(client)
 	if err := endpoints.SyncServiceEndpoints(); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 	data := runtime.EncodeOrDie(testapi.Codec(), &api.Endpoints{
-		TypeMeta: api.TypeMeta{
-			ID:              "foo",
+		ObjectMeta: api.ObjectMeta{
+			Name:            "foo",
 			ResourceVersion: "1",
 		},
 		Endpoints: []string{"1.2.3.4:8080"},
@@ -217,22 +261,25 @@ func TestSyncEndpointsItemsPreexistingIdentical(t *testing.T) {
 	serviceList := api.ServiceList{
 		Items: []api.Service{
 			{
-				TypeMeta: api.TypeMeta{ID: "foo"},
-				Selector: map[string]string{
-					"foo": "bar",
+				ObjectMeta: api.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector: map[string]string{
+						"foo": "bar",
+					},
 				},
 			},
 		},
 	}
 	testServer, endpointsHandler := makeTestServer(t,
 		serverResponse{http.StatusOK, newPodList(1)},
-		serverResponse{http.StatusOK, serviceList},
-		serverResponse{http.StatusOK, api.Endpoints{
-			TypeMeta: api.TypeMeta{
+		serverResponse{http.StatusOK, &serviceList},
+		serverResponse{http.StatusOK, &api.Endpoints{
+			ObjectMeta: api.ObjectMeta{
 				ResourceVersion: "1",
 			},
 			Endpoints: []string{"1.2.3.4:8080"},
 		}})
+	defer testServer.Close()
 	client := client.NewOrDie(&client.Config{Host: testServer.URL, Version: testapi.Version()})
 	endpoints := NewEndpointController(client)
 	if err := endpoints.SyncServiceEndpoints(); err != nil {
@@ -245,24 +292,27 @@ func TestSyncEndpointsItems(t *testing.T) {
 	serviceList := api.ServiceList{
 		Items: []api.Service{
 			{
-				TypeMeta: api.TypeMeta{ID: "foo"},
-				Selector: map[string]string{
-					"foo": "bar",
+				ObjectMeta: api.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector: map[string]string{
+						"foo": "bar",
+					},
 				},
 			},
 		},
 	}
 	testServer, endpointsHandler := makeTestServer(t,
 		serverResponse{http.StatusOK, newPodList(1)},
-		serverResponse{http.StatusOK, serviceList},
-		serverResponse{http.StatusOK, api.Endpoints{}})
+		serverResponse{http.StatusOK, &serviceList},
+		serverResponse{http.StatusOK, &api.Endpoints{}})
+	defer testServer.Close()
 	client := client.NewOrDie(&client.Config{Host: testServer.URL, Version: testapi.Version()})
 	endpoints := NewEndpointController(client)
 	if err := endpoints.SyncServiceEndpoints(); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 	data := runtime.EncodeOrDie(testapi.Codec(), &api.Endpoints{
-		TypeMeta: api.TypeMeta{
+		ObjectMeta: api.ObjectMeta{
 			ResourceVersion: "",
 		},
 		Endpoints: []string{"1.2.3.4:8080"},
@@ -274,16 +324,19 @@ func TestSyncEndpointsPodError(t *testing.T) {
 	serviceList := api.ServiceList{
 		Items: []api.Service{
 			{
-				Selector: map[string]string{
-					"foo": "bar",
+				Spec: api.ServiceSpec{
+					Selector: map[string]string{
+						"foo": "bar",
+					},
 				},
 			},
 		},
 	}
 	testServer, _ := makeTestServer(t,
-		serverResponse{http.StatusInternalServerError, api.PodList{}},
-		serverResponse{http.StatusOK, serviceList},
-		serverResponse{http.StatusOK, api.Endpoints{}})
+		serverResponse{http.StatusInternalServerError, &api.PodList{}},
+		serverResponse{http.StatusOK, &serviceList},
+		serverResponse{http.StatusOK, &api.Endpoints{}})
+	defer testServer.Close()
 	client := client.NewOrDie(&client.Config{Host: testServer.URL, Version: testapi.Version()})
 	endpoints := NewEndpointController(client)
 	if err := endpoints.SyncServiceEndpoints(); err == nil {

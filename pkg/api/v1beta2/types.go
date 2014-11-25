@@ -56,8 +56,9 @@ type Volume struct {
 	Source *VolumeSource `yaml:"source" json:"source"`
 }
 
+// VolumeSource represents the source location of a valume to mount.
+// Only one of its members may be specified.
 type VolumeSource struct {
-	// Only one of the following sources may be specified
 	// HostDir represents a pre-existing directory on the host machine that is directly
 	// exposed to the container. This is generally used for system agents or other privileged
 	// things that are allowed to see the host machine. Most containers will NOT need this.
@@ -69,6 +70,8 @@ type VolumeSource struct {
 	// A persistent disk that is mounted to the
 	// kubelet's host machine and then exposed to the pod.
 	GCEPersistentDisk *GCEPersistentDisk `yaml:"persistentDisk" json:"persistentDisk"`
+	// GitRepo represents a git repository at a particular revision.
+	GitRepo *GitRepo `json:"gitRepo" yaml:"gitRepo"`
 }
 
 // HostDir represents bare host directory volume.
@@ -103,9 +106,10 @@ type Port struct {
 	HostIP string `yaml:"hostIP,omitempty" json:"hostIP,omitempty"`
 }
 
-// GCEPersistent Disk resource.
-// A GCE PD must exist before mounting to a container. The disk must
-// also be in the same GCE project and zone as the kubelet.
+// GCEPersistentDisk represents a Persistent Disk resource in Google Compute Engine.
+//
+// A GCE PD must exist and be formatted before mounting to a container.
+// The disk must also be in the same GCE project and zone as the kubelet.
 // A GCE PD can only be mounted as read/write once.
 type GCEPersistentDisk struct {
 	// Unique name of the PD resource. Used to identify the disk in GCE
@@ -122,6 +126,14 @@ type GCEPersistentDisk struct {
 	// Optional: Defaults to false (read/write). ReadOnly here will force
 	// the ReadOnly setting in VolumeMounts.
 	ReadOnly bool `yaml:"readOnly,omitempty" json:"readOnly,omitempty"`
+}
+
+// GitRepo represents a volume that is pulled from git when the pod is created.
+type GitRepo struct {
+	// Repository URL
+	Repository string `yaml:"repository" json:"repository"`
+	// Commit hash, this is optional
+	Revision string `yaml:"revision" json:"revision"`
 }
 
 // VolumeMount describes a mounting of a Volume within a container.
@@ -184,11 +196,11 @@ type LivenessProbe struct {
 type PullPolicy string
 
 const (
-	// Always attempt to pull the latest image.  Container will fail If the pull fails.
+	// PullAlways means that kubelet always attempts to pull the latest image.  Container will fail If the pull fails.
 	PullAlways PullPolicy = "PullAlways"
-	// Never pull an image, only use a local image.  Container will fail if the image isn't present
+	// PullNever means that kubelet never pulls an image, but only uses a local image.  Container will fail if the image isn't present
 	PullNever PullPolicy = "PullNever"
-	// Pull if the image isn't present on disk. Container will fail if the image isn't present and the pull fails.
+	// PullIfNotPresent means that kubelet pulls if the image isn't present on disk. Container will fail if the image isn't present and the pull fails.
 	PullIfNotPresent PullPolicy = "PullIfNotPresent"
 )
 
@@ -212,6 +224,8 @@ type Container struct {
 	VolumeMounts  []VolumeMount  `yaml:"volumeMounts,omitempty" json:"volumeMounts,omitempty"`
 	LivenessProbe *LivenessProbe `yaml:"livenessProbe,omitempty" json:"livenessProbe,omitempty"`
 	Lifecycle     *Lifecycle     `yaml:"lifecycle,omitempty" json:"lifecycle,omitempty"`
+	// Optional: Defaults to /dev/termination-log
+	TerminationMessagePath string `yaml:"terminationMessagePath,omitempty" json:"terminationMessagePath,omitempty"`
 	// Optional: Default to false.
 	Privileged bool `json:"privileged,omitempty" yaml:"privileged,omitempty"`
 	// Optional: Policy for pulling images for this container
@@ -285,13 +299,15 @@ type ContainerStateTerminated struct {
 	ExitCode   int       `json:"exitCode" yaml:"exitCode"`
 	Signal     int       `json:"signal,omitempty" yaml:"signal,omitempty"`
 	Reason     string    `json:"reason,omitempty" yaml:"reason,omitempty"`
+	Message    string    `json:"message,omitempty" yaml:"message,omitempty"`
 	StartedAt  time.Time `json:"startedAt,omitempty" yaml:"startedAt,omitempty"`
 	FinishedAt time.Time `json:"finishedAt,omitempty" yaml:"finishedAt,omitempty"`
 }
 
+// ContainerState holds a possible state of container.
+// Only one of its members may be specified.
+// If none of them is specified, the default one is ContainerStateWaiting.
 type ContainerState struct {
-	// Only one of the following ContainerState may be specified.
-	// If none of them is specified, the default one is ContainerStateWaiting.
 	Waiting     *ContainerStateWaiting    `json:"waiting,omitempty" yaml:"waiting,omitempty"`
 	Running     *ContainerStateRunning    `json:"running,omitempty" yaml:"running,omitempty"`
 	Termination *ContainerStateTerminated `json:"termination,omitempty" yaml:"termination,omitempty"`
@@ -309,8 +325,6 @@ type ContainerStatus struct {
 	PodIP string `json:"podIP,omitempty" yaml:"podIP,omitempty"`
 	// TODO(dchen1107): Need to decide how to reprensent this in v1beta3
 	Image string `yaml:"image" json:"image"`
-	// TODO(dchen1107): Once we have done with integration with cadvisor, resource
-	// usage should be included.
 }
 
 // PodInfo contains one entry for every container with available info.
@@ -337,9 +351,11 @@ type RestartPolicy struct {
 type PodState struct {
 	Manifest ContainerManifest `json:"manifest,omitempty" yaml:"manifest,omitempty"`
 	Status   PodStatus         `json:"status,omitempty" yaml:"status,omitempty"`
-	Host     string            `json:"host,omitempty" yaml:"host,omitempty"`
-	HostIP   string            `json:"hostIP,omitempty" yaml:"hostIP,omitempty"`
-	PodIP    string            `json:"podIP,omitempty" yaml:"podIP,omitempty"`
+	// A human readable message indicating details about why the pod is in this state.
+	Message string `json:"message,omitempty" yaml:"message,omitempty"`
+	Host    string `json:"host,omitempty" yaml:"host,omitempty"`
+	HostIP  string `json:"hostIP,omitempty" yaml:"hostIP,omitempty"`
+	PodIP   string `json:"podIP,omitempty" yaml:"podIP,omitempty"`
 
 	// The key of this map is the *name* of the container within the manifest; it has one
 	// entry per container in the manifest. The value of this map is currently the output
@@ -353,7 +369,7 @@ type PodState struct {
 // PodList is a list of Pods.
 type PodList struct {
 	TypeMeta `json:",inline" yaml:",inline"`
-	Items    []Pod `json:"items" yaml:"items,omitempty"`
+	Items    []Pod `json:"items" yaml:"items"`
 }
 
 // Pod is a collection of containers, used as either input (create, update) or as output (list, get).
@@ -362,6 +378,8 @@ type Pod struct {
 	Labels       map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 	DesiredState PodState          `json:"desiredState,omitempty" yaml:"desiredState,omitempty"`
 	CurrentState PodState          `json:"currentState,omitempty" yaml:"currentState,omitempty"`
+	// NodeSelector is a selector which must be true for the pod to fit on a node
+	NodeSelector map[string]string `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty"`
 }
 
 // ReplicationControllerState is the state of a replication controller, either input (create, update) or as output (list, get).
@@ -374,7 +392,7 @@ type ReplicationControllerState struct {
 // ReplicationControllerList is a collection of replication controllers.
 type ReplicationControllerList struct {
 	TypeMeta `json:",inline" yaml:",inline"`
-	Items    []ReplicationController `json:"items,omitempty" yaml:"items,omitempty"`
+	Items    []ReplicationController `json:"items" yaml:"items"`
 }
 
 // ReplicationController represents the configuration of a replication controller.
@@ -414,10 +432,20 @@ type Service struct {
 	// This service will route traffic to pods having labels matching this selector.
 	Selector                   map[string]string `json:"selector,omitempty" yaml:"selector,omitempty"`
 	CreateExternalLoadBalancer bool              `json:"createExternalLoadBalancer,omitempty" yaml:"createExternalLoadBalancer,omitempty"`
+	// PublicIPs are used by external load balancers.
+	PublicIPs []string `json:"publicIPs,omitempty" yaml:"publicIPs,omitempty"`
 
 	// ContainerPort is the name of the port on the container to direct traffic to.
 	// Optional, if unspecified use the first port on the container.
 	ContainerPort util.IntOrString `json:"containerPort,omitempty" yaml:"containerPort,omitempty"`
+
+	// PortalIP is usually assigned by the master.  If specified by the user
+	// we will try to respect it or else fail the request.  This field can
+	// not be changed by updates.
+	PortalIP string `json:"portalIP,omitempty" yaml:"portalIP,omitempty"`
+
+	// ProxyPort is assigned by the master.  If specified by the user it will be ignored.
+	ProxyPort int `json:"proxyPort,omitempty" yaml:"proxyPort,omitempty"`
 }
 
 // Endpoints is a collection of endpoints that implement the actual service, for example:
@@ -430,7 +458,7 @@ type Endpoints struct {
 // EndpointsList is a list of endpoints.
 type EndpointsList struct {
 	TypeMeta `json:",inline" yaml:",inline"`
-	Items    []Endpoints `json:"items,omitempty" yaml:"items,omitempty"`
+	Items    []Endpoints `json:"items" yaml:"items"`
 }
 
 // NodeResources represents resources on a Kubernetes system node
@@ -445,19 +473,21 @@ type ResourceName string
 type ResourceList map[ResourceName]util.IntOrString
 
 // Minion is a worker node in Kubernetenes.
-// The name of the minion according to etcd is in TypeMeta.ID.
+// The name of the minion according to etcd is in ID.
 type Minion struct {
 	TypeMeta `json:",inline" yaml:",inline"`
 	// Queried from cloud provider, if available.
 	HostIP string `json:"hostIP,omitempty" yaml:"hostIP,omitempty"`
 	// Resources available on the node
 	NodeResources NodeResources `json:"resources,omitempty" yaml:"resources,omitempty"`
+	// Labels for the node
+	Labels map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 }
 
 // MinionList is a list of minions.
 type MinionList struct {
 	TypeMeta `json:",inline" yaml:",inline"`
-	Items    []Minion `json:"items,omitempty" yaml:"items,omitempty"`
+	Items    []Minion `json:"items" yaml:"items"`
 }
 
 // Binding is written by a scheduler to cause a pod to be bound to a host.
@@ -607,7 +637,7 @@ const (
 	// CauseTypeFieldValueNotFound is used to report failure to find a requested value
 	// (e.g. looking up an ID).
 	CauseTypeFieldValueNotFound CauseType = "FieldValueNotFound"
-	// CauseTypeFieldValueInvalid is used to report required values that are not
+	// CauseTypeFieldValueRequired is used to report required values that are not
 	// provided (e.g. empty strings, null values, or empty arrays).
 	CauseTypeFieldValueRequired CauseType = "FieldValueRequired"
 	// CauseTypeFieldValueDuplicate is used to report collisions of values that must be
@@ -629,14 +659,14 @@ type ServerOp struct {
 // ServerOpList is a list of operations, as delivered to API clients.
 type ServerOpList struct {
 	TypeMeta `yaml:",inline" json:",inline"`
-	Items    []ServerOp `yaml:"items,omitempty" json:"items,omitempty"`
+	Items    []ServerOp `yaml:"items" json:"items"`
 }
 
 // ObjectReference contains enough information to let you inspect or modify the referred object.
 type ObjectReference struct {
 	Kind            string `json:"kind,omitempty" yaml:"kind,omitempty"`
 	Namespace       string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	Name            string `json:"name,omitempty" yaml:"name,omitempty"`
+	ID              string `json:"name,omitempty" yaml:"name,omitempty"`
 	UID             string `json:"uid,omitempty" yaml:"uid,omitempty"`
 	APIVersion      string `json:"apiVersion,omitempty" yaml:"apiVersion,omitempty"`
 	ResourceVersion string `json:"resourceVersion,omitempty" yaml:"resourceVersion,omitempty"`
@@ -681,12 +711,15 @@ type Event struct {
 	// Optional. The component reporting this event. Should be a short machine understandable string.
 	// TODO: provide exact specification for format.
 	Source string `json:"source,omitempty" yaml:"source,omitempty"`
+
+	// The time at which the client recorded the event. (Time of server receipt is in TypeMeta.)
+	Timestamp util.Time `json:"timestamp,omitempty" yaml:"timestamp,omitempty"`
 }
 
 // EventList is a list of events.
 type EventList struct {
 	TypeMeta `yaml:",inline" json:",inline"`
-	Items    []Event `yaml:"items,omitempty" json:"items,omitempty"`
+	Items    []Event `yaml:"items" json:"items"`
 }
 
 // ContainerManifest corresponds to the Container Manifest format, documented at:
@@ -712,7 +745,7 @@ type ContainerManifest struct {
 // DEPRECATED: Replaced with BoundPods
 type ContainerManifestList struct {
 	TypeMeta `json:",inline" yaml:",inline"`
-	Items    []ContainerManifest `json:"items,omitempty" yaml:"items,omitempty"`
+	Items    []ContainerManifest `json:"items" yaml:"items,omitempty"`
 }
 
 // Backported from v1beta3 to replace ContainerManifest
@@ -722,6 +755,8 @@ type PodSpec struct {
 	Volumes       []Volume      `json:"volumes" yaml:"volumes"`
 	Containers    []Container   `json:"containers" yaml:"containers"`
 	RestartPolicy RestartPolicy `json:"restartPolicy,omitempty" yaml:"restartPolicy,omitempty"`
+	// NodeSelector is a selector which must be true for the pod to fit on a node
+	NodeSelector map[string]string `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty"`
 }
 
 // BoundPod is a collection of containers that should be run on a host. A BoundPod

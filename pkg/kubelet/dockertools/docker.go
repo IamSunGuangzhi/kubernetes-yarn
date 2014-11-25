@@ -17,28 +17,24 @@ limitations under the License.
 package dockertools
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"hash/adler32"
 	"io"
+	"io/ioutil"
 	"math/rand"
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/credentialprovider"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
-	"github.com/fsouza/go-dockerclient"
+	docker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/glog"
 )
-
-// DockerContainerData is the structured representation of the JSON object returned by Docker inspect
-type DockerContainerData struct {
-	state struct {
-		Running bool
-	}
-}
 
 // DockerInterface is an abstract interface for testability.  It abstracts the interface of docker.Client.
 type DockerInterface interface {
@@ -51,6 +47,9 @@ type DockerInterface interface {
 	InspectImage(image string) (*docker.Image, error)
 	PullImage(opts docker.PullImageOptions, auth docker.AuthConfiguration) error
 	Logs(opts docker.LogsOptions) error
+	Version() (*docker.Env, error)
+	CreateExec(docker.CreateExecOptions) (*docker.Exec, error)
+	StartExec(string, docker.StartExecOptions) error
 }
 
 // DockerID is an ID of docker container. It is a type to make it clear when we're working with docker container Ids
@@ -65,7 +64,7 @@ type DockerPuller interface {
 // dockerPuller is the default implementation of DockerPuller.
 type dockerPuller struct {
 	client  DockerInterface
-	keyring *dockerKeyring
+	keyring credentialprovider.DockerKeyring
 }
 
 type throttledDockerPuller struct {
@@ -77,19 +76,9 @@ type throttledDockerPuller struct {
 func NewDockerPuller(client DockerInterface, qps float32, burst int) DockerPuller {
 	dp := dockerPuller{
 		client:  client,
-		keyring: newDockerKeyring(),
+		keyring: credentialprovider.NewDockerKeyring(),
 	}
 
-	cfg, err := readDockerConfigFile()
-	if err == nil {
-		cfg.addToKeyring(dp.keyring)
-	} else {
-		glog.Errorf("Unable to parse Docker config file: %v", err)
-	}
-
-	if dp.keyring.count() == 0 {
-		glog.V(1).Infof("Continuing with empty Docker keyring")
-	}
 	if qps == 0.0 {
 		return dp
 	}
@@ -99,7 +88,51 @@ func NewDockerPuller(client DockerInterface, qps float32, burst int) DockerPulle
 	}
 }
 
-type dockerContainerCommandRunner struct{}
+type dockerContainerCommandRunner struct {
+	client DockerInterface
+}
+
+// The first version of docker that supports exec natively is 1.1.3
+var dockerVersionWithExec = []uint{1, 1, 3}
+
+// Returns the major and minor version numbers of docker server.
+func (d *dockerContainerCommandRunner) getDockerServerVersion() ([]uint, error) {
+	env, err := d.client.Version()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get docker server version - %s", err)
+	}
+	version := []uint{}
+	for _, entry := range *env {
+		if strings.Contains(strings.ToLower(entry), "server version") {
+			elems := strings.Split(strings.Split(entry, "=")[1], ".")
+			for _, elem := range elems {
+				val, err := strconv.ParseUint(elem, 10, 32)
+				if err != nil {
+					return nil, fmt.Errorf("failed to parse docker server version (%s) - %s", entry, err)
+				}
+				version = append(version, uint(val))
+			}
+			return version, nil
+		}
+	}
+	return nil, fmt.Errorf("docker server version missing from server version output - %+v", env)
+}
+
+func (d *dockerContainerCommandRunner) nativeExecSupportExists() (bool, error) {
+	version, err := d.getDockerServerVersion()
+	if err != nil {
+		return false, err
+	}
+	if len(dockerVersionWithExec) != len(version) {
+		return false, fmt.Errorf("unexpected docker version format. Expecting %v format, got %v", dockerVersionWithExec, version)
+	}
+	for idx, val := range dockerVersionWithExec {
+		if version[idx] < val {
+			return false, nil
+		}
+	}
+	return true, nil
+}
 
 func (d *dockerContainerCommandRunner) getRunInContainerCommand(containerID string, cmd []string) (*exec.Cmd, error) {
 	args := append([]string{"exec"}, cmd...)
@@ -108,8 +141,7 @@ func (d *dockerContainerCommandRunner) getRunInContainerCommand(containerID stri
 	return command, nil
 }
 
-// RunInContainer uses nsinit to run the command inside the container identified by containerID
-func (d *dockerContainerCommandRunner) RunInContainer(containerID string, cmd []string) ([]byte, error) {
+func (d *dockerContainerCommandRunner) runInContainerUsingNsinit(containerID string, cmd []string) ([]byte, error) {
 	c, err := d.getRunInContainerCommand(containerID, cmd)
 	if err != nil {
 		return nil, err
@@ -117,10 +149,49 @@ func (d *dockerContainerCommandRunner) RunInContainer(containerID string, cmd []
 	return c.CombinedOutput()
 }
 
+// RunInContainer uses nsinit to run the command inside the container identified by containerID
+func (d *dockerContainerCommandRunner) RunInContainer(containerID string, cmd []string) ([]byte, error) {
+	// If native exec support does not exist in the local docker daemon use nsinit.
+	useNativeExec, err := d.nativeExecSupportExists()
+	if err != nil {
+		return nil, err
+	}
+	if !useNativeExec {
+		return d.runInContainerUsingNsinit(containerID, cmd)
+	}
+	createOpts := docker.CreateExecOptions{
+		Container:    containerID,
+		Cmd:          cmd,
+		AttachStdin:  false,
+		AttachStdout: true,
+		AttachStderr: true,
+		Tty:          false,
+	}
+	execObj, err := d.client.CreateExec(createOpts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to run in container - Exec setup failed - %s", err)
+	}
+	var buf bytes.Buffer
+	wrBuf := bufio.NewWriter(&buf)
+	startOpts := docker.StartExecOptions{
+		Detach:       false,
+		Tty:          false,
+		OutputStream: wrBuf,
+		ErrorStream:  wrBuf,
+		RawTerminal:  false,
+	}
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- d.client.StartExec(execObj.Id, startOpts)
+	}()
+	wrBuf.Flush()
+	return buf.Bytes(), <-errChan
+}
+
 // NewDockerContainerCommandRunner creates a ContainerCommandRunner which uses nsinit to run a command
 // inside a container.
-func NewDockerContainerCommandRunner() ContainerCommandRunner {
-	return &dockerContainerCommandRunner{}
+func NewDockerContainerCommandRunner(client DockerInterface) ContainerCommandRunner {
+	return &dockerContainerCommandRunner{client: client}
 }
 
 func (p dockerPuller) Pull(image string) error {
@@ -136,7 +207,7 @@ func (p dockerPuller) Pull(image string) error {
 		Tag:        tag,
 	}
 
-	creds, ok := p.keyring.lookup(image)
+	creds, ok := p.keyring.Lookup(image)
 	if !ok {
 		glog.V(1).Infof("Pulling image %s without credentials", image)
 	}
@@ -163,6 +234,16 @@ func (p dockerPuller) IsImagePresent(name string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+// RequireLatestImage returns if the user wants the latest image
+func RequireLatestImage(name string) bool {
+	_, tag := parseImageName(name)
+
+	if tag == "latest" {
+		return true
+	}
+	return false
 }
 
 func (p throttledDockerPuller) IsImagePresent(name string) (bool, error) {
@@ -213,7 +294,7 @@ func GetKubeletDockerContainers(client DockerInterface, allContainers bool) (Doc
 		// TODO(dchen1107): Remove the old separator "--" by end of Oct
 		if !strings.HasPrefix(container.Names[0], "/"+containerNamePrefix+"_") &&
 			!strings.HasPrefix(container.Names[0], "/"+containerNamePrefix+"--") {
-			glog.Infof("Docker Container:%s is not managed by kubelet.", container.Names[0])
+			glog.V(3).Infof("Docker Container: %s is not managed by kubelet.", container.Names[0])
 			continue
 		}
 		result[DockerID(container.ID)] = container
@@ -252,6 +333,7 @@ func GetRecentDockerContainersWithNameAndUUID(client DockerInterface, podFullNam
 // By default the function will return snapshot of the container log
 // Log streaming is possible if 'follow' param is set to true
 // Log tailing is possible when number of tailed lines are set and only if 'follow' is false
+// TODO: Make 'RawTerminal' option  flagable.
 func GetKubeletDockerContainerLogs(client DockerInterface, containerID, tail string, follow bool, stdout, stderr io.Writer) (err error) {
 	opts := docker.LogsOptions{
 		Container:    containerID,
@@ -260,7 +342,7 @@ func GetKubeletDockerContainerLogs(client DockerInterface, containerID, tail str
 		OutputStream: stdout,
 		ErrorStream:  stderr,
 		Timestamps:   true,
-		RawTerminal:  true,
+		RawTerminal:  false,
 		Follow:       follow,
 	}
 
@@ -283,8 +365,9 @@ var (
 	ErrContainerCannotRun = errors.New("Container cannot run")
 )
 
-func inspectContainer(client DockerInterface, dockerID, containerName string) (*api.ContainerStatus, error) {
+func inspectContainer(client DockerInterface, dockerID, containerName, tPath string) (*api.ContainerStatus, error) {
 	inspectResult, err := client.InspectContainer(dockerID)
+
 	if err != nil {
 		return nil, err
 	}
@@ -315,6 +398,17 @@ func inspectContainer(client DockerInterface, dockerID, containerName string) (*
 			StartedAt:  inspectResult.State.StartedAt,
 			FinishedAt: inspectResult.State.FinishedAt,
 		}
+		if tPath != "" {
+			path, found := inspectResult.Volumes[tPath]
+			if found {
+				data, err := ioutil.ReadFile(path)
+				if err != nil {
+					glog.Errorf("Error on reading termination-log %s(%v)", path, err)
+				} else {
+					containerStatus.State.Termination.Message = string(data)
+				}
+			}
+		}
 		waiting = false
 	}
 
@@ -331,8 +425,13 @@ func inspectContainer(client DockerInterface, dockerID, containerName string) (*
 }
 
 // GetDockerPodInfo returns docker info for all containers in the pod/manifest.
-func GetDockerPodInfo(client DockerInterface, manifest api.ContainerManifest, podFullName, uuid string) (api.PodInfo, error) {
+func GetDockerPodInfo(client DockerInterface, manifest api.PodSpec, podFullName, uuid string) (api.PodInfo, error) {
 	info := api.PodInfo{}
+	expectedContainers := make(map[string]api.Container)
+	for _, container := range manifest.Containers {
+		expectedContainers[container.Name] = container
+	}
+	expectedContainers["net"] = api.Container{}
 
 	containers, err := client.ListContainers(docker.ListContainersOptions{All: true})
 	if err != nil {
@@ -347,6 +446,14 @@ func GetDockerPodInfo(client DockerInterface, manifest api.ContainerManifest, po
 		if uuid != "" && dockerUUID != uuid {
 			continue
 		}
+		c, found := expectedContainers[dockerContainerName]
+		terminationMessagePath := ""
+		if !found {
+			// TODO(dchen1107): should figure out why not continue here
+			// continue
+		} else {
+			terminationMessagePath = c.TerminationMessagePath
+		}
 		// We assume docker return us a list of containers in time order
 		if containerStatus, found := info[dockerContainerName]; found {
 			containerStatus.RestartCount += 1
@@ -354,7 +461,7 @@ func GetDockerPodInfo(client DockerInterface, manifest api.ContainerManifest, po
 			continue
 		}
 
-		containerStatus, err := inspectContainer(client, value.ID, dockerContainerName)
+		containerStatus, err := inspectContainer(client, value.ID, dockerContainerName, terminationMessagePath)
 		if err != nil {
 			return nil, err
 		}
@@ -489,56 +596,4 @@ func parseImageName(image string) (string, string) {
 
 type ContainerCommandRunner interface {
 	RunInContainer(containerID string, cmd []string) ([]byte, error)
-}
-
-// dockerKeyring tracks a set of docker registry credentials, maintaining a
-// reverse index across the registry endpoints. A registry endpoint is made
-// up of a host (e.g. registry.example.com), but it may also contain a path
-// (e.g. registry.example.com/foo) This index is important for two reasons:
-// - registry endpoints may overlap, and when this happens we must find the
-//   most specific match for a given image
-// - iterating a map does not yield predictable results
-type dockerKeyring struct {
-	index []string
-	creds map[string]docker.AuthConfiguration
-}
-
-func newDockerKeyring() *dockerKeyring {
-	return &dockerKeyring{
-		index: make([]string, 0),
-		creds: make(map[string]docker.AuthConfiguration),
-	}
-}
-
-func (dk *dockerKeyring) add(registry string, creds docker.AuthConfiguration) {
-	dk.creds[registry] = creds
-
-	dk.index = append(dk.index, registry)
-	dk.reindex()
-}
-
-// reindex updates the index used to identify which credentials to use for
-// a given image. The index is reverse-sorted so more specific paths are
-// matched first. For example, if for the given image "quay.io/coreos/etcd",
-// credentials for "quay.io/coreos" should match before "quay.io".
-func (dk *dockerKeyring) reindex() {
-	sort.Sort(sort.Reverse(sort.StringSlice(dk.index)))
-}
-
-func (dk *dockerKeyring) lookup(image string) (docker.AuthConfiguration, bool) {
-	// range over the index as iterating over a map does not provide
-	// a predictable ordering
-	for _, k := range dk.index {
-		if !strings.HasPrefix(image, k) {
-			continue
-		}
-
-		return dk.creds[k], true
-	}
-
-	return docker.AuthConfiguration{}, false
-}
-
-func (dk dockerKeyring) count() int {
-	return len(dk.creds)
 }

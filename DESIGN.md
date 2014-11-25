@@ -7,12 +7,10 @@
 - [The Kubernetes Node](#the-kubernetes-node)
   - [Kubelet](#kubelet)
   - [Kubernetes Proxy](#kubernetes-proxy)
-- [The Kubernetes Master](#the-kubernetes-master)
+- [The Kubernetes Control Plane](#the-kubernetes-control-plane)
   - [etcd](#etcd)
   - [Kubernetes API Server](#kubernetes-api-server)
   - [Kubernetes Controller Manager Server](#kubernetes-controller-manager-server)
-- [Network Model](#network-model)
-- [Release Process](#release-process)
 - [GCE Cluster Configuration](#gce-cluster-configuration)
   - [Cluster Security](#cluster-security)
 
@@ -96,9 +94,9 @@ There are 4 ways that a container manifest can be provided to the Kubelet:
 
 ### Kubernetes Proxy
 
-Each node also runs a simple network proxy.  This reflects `services` as defined in the Kubernetes API on each node and can do simple TCP stream forwarding or round robin TCP forwarding across a set of backends.
+Each node also runs a simple network proxy.  This reflects `services` (see [here](docs/services.md) for more details) as defined in the Kubernetes API on each node and can do simple TCP and UDP stream forwarding (round robin) across a set of backends.
 
-Service endpoints are currently found through [Docker-links-compatible](https://docs.docker.com/userguide/dockerlinks/) environment variables specifying ports opened by the service proxy. Currently the user must select a unique port to expose the service on on the proxy, as well as the container's port to target.
+Service endpoints are currently found through environment variables (both [Docker-links-compatible](https://docs.docker.com/userguide/dockerlinks/) and Kubernetes {FOO}_SERVICE_HOST and {FOO}_SERVICE_PORT variables are supported).  These variables resolve to ports managed by the service proxy.
 
 ## The Kubernetes Control Plane
 

@@ -18,9 +18,11 @@ limitations under the License.
 package testapi
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/meta"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 )
 
@@ -43,12 +45,22 @@ func Codec() runtime.Codec {
 	return interfaces.Codec
 }
 
-// ResourceVersioner returns the ResourceVersioner for the API version to test against,
+// MetadataAccessor returns the MetadataAccessor for the API version to test against,
 // as set by the KUBE_API_VERSION env var.
-func ResourceVersioner() runtime.ResourceVersioner {
+func MetadataAccessor() meta.MetadataAccessor {
 	interfaces, err := latest.InterfacesFor(Version())
 	if err != nil {
 		panic(err)
 	}
-	return interfaces.ResourceVersioner
+	return interfaces.MetadataAccessor
+}
+
+// SelfLink returns a self link that will appear to be for the version Version().
+// 'resource' should be the resource path, e.g. "pods" for the Pod type. 'name' should be
+// empty for lists.
+func SelfLink(resource, name string) string {
+	if name == "" {
+		return fmt.Sprintf("/api/%s/%s", Version(), resource)
+	}
+	return fmt.Sprintf("/api/%s/%s/%s", Version(), resource, name)
 }

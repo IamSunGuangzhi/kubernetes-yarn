@@ -220,7 +220,7 @@ func (yarnScheduler *YARNScheduler) Schedule(pod api.Pod, minionLister MinionLis
 			numAllocatedContainers++
 			log.Println("#containers allocated so far: ", numAllocatedContainers)
 
-			yarnScheduler.podsToContainersMap[pod.ID] = container.GetId()
+			yarnScheduler.podsToContainersMap[pod.UID] = container.GetId()
 			host := *container.NodeId.Host
 			log.Println("allocated container on: ", host)
 
@@ -255,7 +255,7 @@ func findMinionForHost(host string, minionLister MinionLister) (string, error) {
 		}
 
 		for _, minion := range minions.Items {
-			minionStr := minion.ID
+			minionStr := minion.Name
 			minionIPs, err := net.LookupIP(minionStr)
 
 			if err != nil {

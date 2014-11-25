@@ -20,6 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 )
 
+// Scheme is the default instance of runtime.Scheme to which types in the Kubernetes API are already registered.
 var Scheme = runtime.NewScheme()
 
 func init() {
@@ -40,7 +41,9 @@ func init() {
 		&Binding{},
 		&Event{},
 		&EventList{},
+		&ContainerManifest{},
 		&ContainerManifestList{},
+		&BoundPod{},
 		&BoundPods{},
 	)
 }
@@ -61,5 +64,7 @@ func (*ServerOp) IsAnAPIObject()                  {}
 func (*ServerOpList) IsAnAPIObject()              {}
 func (*Event) IsAnAPIObject()                     {}
 func (*EventList) IsAnAPIObject()                 {}
+func (*ContainerManifest) IsAnAPIObject()         {}
 func (*ContainerManifestList) IsAnAPIObject()     {}
+func (*BoundPod) IsAnAPIObject()                  {}
 func (*BoundPods) IsAnAPIObject()                 {}

@@ -34,7 +34,16 @@ type Interface interface {
 	EnsureRule(table Table, chain Chain, args ...string) (bool, error)
 	// DeleteRule checks if the specified rule is present and, if so, deletes it.
 	DeleteRule(table Table, chain Chain, args ...string) error
+	// IsIpv6 returns true if this is managing ipv6 tables
+	IsIpv6() bool
 }
+
+type Protocol byte
+
+const (
+	ProtocolIpv4 Protocol = iota + 1
+	ProtocolIpv6
+)
 
 type Table string
 
@@ -45,19 +54,21 @@ const (
 type Chain string
 
 const (
-	ChainPrerouting Chain = "PREROUTING"
-	ChainOutput     Chain = "OUTPUT"
+	ChainPostrouting Chain = "POSTROUTING"
+	ChainPrerouting  Chain = "PREROUTING"
+	ChainOutput      Chain = "OUTPUT"
 )
 
 // runner implements Interface in terms of exec("iptables").
 type runner struct {
-	mu   sync.Mutex
-	exec utilexec.Interface
+	mu       sync.Mutex
+	exec     utilexec.Interface
+	protocol Protocol
 }
 
 // New returns a new Interface which will exec iptables.
-func New(exec utilexec.Interface) Interface {
-	return &runner{exec: exec}
+func New(exec utilexec.Interface, protocol Protocol) Interface {
+	return &runner{exec: exec, protocol: protocol}
 }
 
 // EnsureChain is part of Interface.
@@ -135,8 +146,20 @@ func (runner *runner) DeleteRule(table Table, chain Chain, args ...string) error
 	return nil
 }
 
+func (runner *runner) IsIpv6() bool {
+	return runner.protocol == ProtocolIpv6
+}
+
+func (runner *runner) iptablesCommand() string {
+	if runner.IsIpv6() {
+		return "ip6tables"
+	} else {
+		return "iptables"
+	}
+}
+
 func (runner *runner) run(op operation, args []string) ([]byte, error) {
-	const iptablesCmd = "iptables"
+	iptablesCmd := runner.iptablesCommand()
 
 	fullArgs := append([]string{string(op)}, args...)
 	glog.V(1).Infof("running iptables %s %v", string(op), args)

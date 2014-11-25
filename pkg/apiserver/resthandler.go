@@ -29,6 +29,7 @@ import (
 	"github.com/golang/glog"
 )
 
+// RESTHandler implements HTTP verbs on a set of RESTful resources identified by name.
 type RESTHandler struct {
 	storage         map[string]RESTStorage
 	codec           runtime.Codec
@@ -61,26 +62,44 @@ func (h *RESTHandler) setSelfLink(obj runtime.Object, req *http.Request) error {
 	newURL.Path = path.Join(h.canonicalPrefix, req.URL.Path)
 	newURL.RawQuery = ""
 	newURL.Fragment = ""
-	return h.selfLinker.SetSelfLink(obj, newURL.String())
+	err := h.selfLinker.SetSelfLink(obj, newURL.String())
+	if err != nil {
+		return err
+	}
+	if !runtime.IsListType(obj) {
+		return nil
+	}
+
+	// Set self-link of objects in the list.
+	items, err := runtime.ExtractList(obj)
+	if err != nil {
+		return err
+	}
+	for i := range items {
+		if err := h.setSelfLinkAddName(items[i], req); err != nil {
+			return err
+		}
+	}
+	return runtime.SetList(obj, items)
 }
 
-// Like setSelfLink, but appends the object's id.
-func (h *RESTHandler) setSelfLinkAddID(obj runtime.Object, req *http.Request) error {
-	id, err := h.selfLinker.ID(obj)
+// Like setSelfLink, but appends the object's name.
+func (h *RESTHandler) setSelfLinkAddName(obj runtime.Object, req *http.Request) error {
+	name, err := h.selfLinker.Name(obj)
 	if err != nil {
 		return err
 	}
 	newURL := *req.URL
-	newURL.Path = path.Join(h.canonicalPrefix, req.URL.Path, id)
+	newURL.Path = path.Join(h.canonicalPrefix, req.URL.Path, name)
 	newURL.RawQuery = ""
 	newURL.Fragment = ""
 	return h.selfLinker.SetSelfLink(obj, newURL.String())
 }
 
 // curry adapts either of the self link setting functions into a function appropriate for operation's hook.
-func curry(f func(runtime.Object, *http.Request) error, req *http.Request) func(runtime.Object) {
-	return func(obj runtime.Object) {
-		if err := f(obj, req); err != nil {
+func curry(f func(runtime.Object, *http.Request) error, req *http.Request) func(RESTResult) {
+	return func(obj RESTResult) {
+		if err := f(obj.Object, req); err != nil {
 			glog.Errorf("unable to set self link for %#v: %v", obj, err)
 		}
 	}
@@ -100,10 +119,17 @@ func curry(f func(runtime.Object, *http.Request) error, req *http.Request) func(
 //    timeout=<duration> Timeout for synchronous requests, only applies if sync=true
 //    labels=<label-selector> Used for filtering list operations
 func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w http.ResponseWriter, storage RESTStorage) {
-	// TODO for now, we perform all operations in the default namespace
-	ctx := api.NewDefaultContext()
+	ctx := api.NewContext()
 	sync := req.URL.Query().Get("sync") == "true"
 	timeout := parseTimeout(req.URL.Query().Get("timeout"))
+	// TODO for now, we pull namespace from query parameter, but according to spec, it must go in resource path in future PR
+	// if a namespace if specified, it's always used.
+	// for list/watch operations, a namespace is not required if omitted.
+	// for all other operations, if namespace is omitted, we will default to default namespace.
+	namespace := req.URL.Query().Get("namespace")
+	if len(namespace) > 0 {
+		ctx = api.WithNamespace(ctx, namespace)
+	}
 	switch req.Method {
 	case "GET":
 		switch len(parts) {
@@ -129,7 +155,7 @@ func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w htt
 			}
 			writeJSON(http.StatusOK, h.codec, list, w)
 		case 2:
-			item, err := storage.Get(ctx, parts[1])
+			item, err := storage.Get(api.WithNamespaceDefaultIfNone(ctx), parts[1])
 			if err != nil {
 				errorJSON(err, h.codec, w)
 				return
@@ -159,12 +185,12 @@ func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w htt
 			errorJSON(err, h.codec, w)
 			return
 		}
-		out, err := storage.Create(ctx, obj)
+		out, err := storage.Create(api.WithNamespaceDefaultIfNone(ctx), obj)
 		if err != nil {
 			errorJSON(err, h.codec, w)
 			return
 		}
-		op := h.createOperation(out, sync, timeout, curry(h.setSelfLinkAddID, req))
+		op := h.createOperation(out, sync, timeout, curry(h.setSelfLinkAddName, req))
 		h.finishReq(op, req, w)
 
 	case "DELETE":
@@ -172,7 +198,7 @@ func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w htt
 			notFound(w, req)
 			return
 		}
-		out, err := storage.Delete(ctx, parts[1])
+		out, err := storage.Delete(api.WithNamespaceDefaultIfNone(ctx), parts[1])
 		if err != nil {
 			errorJSON(err, h.codec, w)
 			return
@@ -196,7 +222,7 @@ func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w htt
 			errorJSON(err, h.codec, w)
 			return
 		}
-		out, err := storage.Update(ctx, obj)
+		out, err := storage.Update(api.WithNamespaceDefaultIfNone(ctx), obj)
 		if err != nil {
 			errorJSON(err, h.codec, w)
 			return
@@ -210,7 +236,7 @@ func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w htt
 }
 
 // createOperation creates an operation to process a channel response.
-func (h *RESTHandler) createOperation(out <-chan runtime.Object, sync bool, timeout time.Duration, onReceive func(runtime.Object)) *Operation {
+func (h *RESTHandler) createOperation(out <-chan RESTResult, sync bool, timeout time.Duration, onReceive func(RESTResult)) *Operation {
 	op := h.ops.NewOperation(out, onReceive)
 	if sync {
 		op.WaitFor(timeout)
@@ -223,9 +249,13 @@ func (h *RESTHandler) createOperation(out <-chan runtime.Object, sync bool, time
 // finishReq finishes up a request, waiting until the operation finishes or, after a timeout, creating an
 // Operation to receive the result and returning its ID down the writer.
 func (h *RESTHandler) finishReq(op *Operation, req *http.Request, w http.ResponseWriter) {
-	obj, complete := op.StatusOrResult()
+	result, complete := op.StatusOrResult()
+	obj := result.Object
 	if complete {
 		status := http.StatusOK
+		if result.Created {
+			status = http.StatusCreated
+		}
 		switch stat := obj.(type) {
 		case *api.Status:
 			if stat.Code != 0 {

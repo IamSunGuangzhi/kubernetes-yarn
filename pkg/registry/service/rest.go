@@ -19,6 +19,7 @@ package service
 import (
 	"fmt"
 	"math/rand"
+	"net"
 	"strconv"
 	"strings"
 
@@ -30,41 +31,89 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/minion"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
+	"github.com/golang/glog"
 )
 
 // REST adapts a service registry into apiserver's RESTStorage model.
 type REST struct {
-	registry Registry
-	cloud    cloudprovider.Interface
-	machines minion.Registry
+	registry  Registry
+	cloud     cloudprovider.Interface
+	machines  minion.Registry
+	portalMgr *ipAllocator
 }
 
 // NewREST returns a new REST.
-func NewREST(registry Registry, cloud cloudprovider.Interface, machines minion.Registry) *REST {
+func NewREST(registry Registry, cloud cloudprovider.Interface, machines minion.Registry, portalNet *net.IPNet) *REST {
+	// TODO: Before we can replicate masters, this has to be synced (e.g. lives in etcd)
+	ipa := newIPAllocator(portalNet)
+	if ipa == nil {
+		glog.Fatalf("Failed to create an IP allocator. Is subnet '%v' valid?", portalNet)
+	}
+	reloadIPsFromStorage(ipa, registry)
+
 	return &REST{
-		registry: registry,
-		cloud:    cloud,
-		machines: machines,
+		registry:  registry,
+		cloud:     cloud,
+		machines:  machines,
+		portalMgr: ipa,
 	}
 }
 
-func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan runtime.Object, error) {
-	srv := obj.(*api.Service)
-	if !api.ValidNamespace(ctx, &srv.TypeMeta) {
-		return nil, errors.NewConflict("service", srv.Namespace, fmt.Errorf("Service.Namespace does not match the provided context"))
+// Helper: mark all previously allocated IPs in the allocator.
+func reloadIPsFromStorage(ipa *ipAllocator, registry Registry) {
+	services, err := registry.ListServices(api.NewContext())
+	if err != nil {
+		// This is really bad.
+		glog.Errorf("can't list services to init service REST: %s", err)
+		return
 	}
-	if errs := validation.ValidateService(srv); len(errs) > 0 {
-		return nil, errors.NewInvalid("service", srv.ID, errs)
+	for i := range services.Items {
+		service := &services.Items[i]
+		if service.Spec.PortalIP == "" {
+			glog.Warningf("service %q has no PortalIP", service.Name)
+			continue
+		}
+		if err := ipa.Allocate(net.ParseIP(service.Spec.PortalIP)); err != nil {
+			// This is really bad.
+			glog.Errorf("service %q PortalIP %s could not be allocated: %s", service.Name, service.Spec.PortalIP, err)
+		}
+	}
+}
+
+func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan apiserver.RESTResult, error) {
+	service := obj.(*api.Service)
+	if !api.ValidNamespace(ctx, &service.ObjectMeta) {
+		return nil, errors.NewConflict("service", service.Namespace, fmt.Errorf("Service.Namespace does not match the provided context"))
+	}
+	if errs := validation.ValidateService(service, rs.registry, ctx); len(errs) > 0 {
+		return nil, errors.NewInvalid("service", service.Name, errs)
 	}
 
-	srv.CreationTimestamp = util.Now()
+	api.FillObjectMetaSystemFields(ctx, &service.ObjectMeta)
+
+	if service.Spec.PortalIP == "" {
+		// Allocate next available.
+		if ip, err := rs.portalMgr.AllocateNext(); err != nil {
+			return nil, err
+		} else {
+			service.Spec.PortalIP = ip.String()
+		}
+	} else {
+		// Try to respect the requested IP.
+		if err := rs.portalMgr.Allocate(net.ParseIP(service.Spec.PortalIP)); err != nil {
+			// TODO: Differentiate "IP already allocated" from real errors.
+			el := errors.ValidationErrorList{errors.NewFieldInvalid("spec.portalIP", service.Spec.PortalIP)}
+			return nil, errors.NewInvalid("service", service.Name, el)
+		}
+	}
 
 	return apiserver.MakeAsync(func() (runtime.Object, error) {
 		// TODO: Consider moving this to a rectification loop, so that we make/remove external load balancers
 		// correctly no matter what http operations happen.
-		if srv.CreateExternalLoadBalancer {
+		// TODO: Get rid of ProxyPort.
+		service.Spec.ProxyPort = 0
+		if service.Spec.CreateExternalLoadBalancer {
 			if rs.cloud == nil {
 				return nil, fmt.Errorf("requested an external service, but no cloud provider supplied.")
 			}
@@ -84,32 +133,44 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan runtime.Obje
 			if err != nil {
 				return nil, err
 			}
-			err = balancer.CreateTCPLoadBalancer(srv.ID, zone.Region, srv.Port, hostsFromMinionList(hosts))
+			var ip net.IP
+			if len(service.Spec.PublicIPs) > 0 {
+				for _, publicIP := range service.Spec.PublicIPs {
+					ip, err = balancer.CreateTCPLoadBalancer(service.Name, zone.Region, net.ParseIP(publicIP), service.Spec.Port, hostsFromMinionList(hosts))
+					if err != nil {
+						break
+					}
+				}
+			} else {
+				ip, err = balancer.CreateTCPLoadBalancer(service.Name, zone.Region, nil, service.Spec.Port, hostsFromMinionList(hosts))
+			}
 			if err != nil {
 				return nil, err
 			}
+			service.Spec.PublicIPs = []string{ip.String()}
 		}
-		err := rs.registry.CreateService(ctx, srv)
+		err := rs.registry.CreateService(ctx, service)
 		if err != nil {
 			return nil, err
 		}
-		return rs.registry.GetService(ctx, srv.ID)
+		return rs.registry.GetService(ctx, service.Name)
 	}), nil
 }
 
 func hostsFromMinionList(list *api.MinionList) []string {
 	result := make([]string, len(list.Items))
 	for ix := range list.Items {
-		result[ix] = list.Items[ix].ID
+		result[ix] = list.Items[ix].Name
 	}
 	return result
 }
 
-func (rs *REST) Delete(ctx api.Context, id string) (<-chan runtime.Object, error) {
+func (rs *REST) Delete(ctx api.Context, id string) (<-chan apiserver.RESTResult, error) {
 	service, err := rs.registry.GetService(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	rs.portalMgr.Release(net.ParseIP(service.Spec.PortalIP))
 	return apiserver.MakeAsync(func() (runtime.Object, error) {
 		rs.deleteExternalLoadBalancer(service)
 		return &api.Status{Status: api.StatusSuccess}, rs.registry.DeleteService(ctx, id)
@@ -117,11 +178,11 @@ func (rs *REST) Delete(ctx api.Context, id string) (<-chan runtime.Object, error
 }
 
 func (rs *REST) Get(ctx api.Context, id string) (runtime.Object, error) {
-	s, err := rs.registry.GetService(ctx, id)
+	service, err := rs.registry.GetService(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return s, err
+	return service, err
 }
 
 // TODO: implement field selector?
@@ -160,35 +221,43 @@ func GetServiceEnvironmentVariables(ctx api.Context, registry Registry, machine 
 	}
 	for _, service := range services.Items {
 		// Host
-		name := makeEnvVariableName(service.ID) + "_SERVICE_HOST"
-		result = append(result, api.EnvVar{Name: name, Value: machine})
+		name := makeEnvVariableName(service.Name) + "_SERVICE_HOST"
+		result = append(result, api.EnvVar{Name: name, Value: service.Spec.PortalIP})
 		// Port
-		name = makeEnvVariableName(service.ID) + "_SERVICE_PORT"
-		result = append(result, api.EnvVar{Name: name, Value: strconv.Itoa(service.Port)})
+		name = makeEnvVariableName(service.Name) + "_SERVICE_PORT"
+		result = append(result, api.EnvVar{Name: name, Value: strconv.Itoa(service.Spec.Port)})
 		// Docker-compatible vars.
-		result = append(result, makeLinkVariables(service, machine)...)
+		result = append(result, makeLinkVariables(service)...)
 	}
-	// The 'SERVICE_HOST' variable is deprecated.
-	// TODO(thockin): get rid of it once ip-per-service is in and "deployed".
-	result = append(result, api.EnvVar{Name: "SERVICE_HOST", Value: machine})
 	return result, nil
 }
 
-func (rs *REST) Update(ctx api.Context, obj runtime.Object) (<-chan runtime.Object, error) {
-	srv := obj.(*api.Service)
-	if !api.ValidNamespace(ctx, &srv.TypeMeta) {
-		return nil, errors.NewConflict("service", srv.Namespace, fmt.Errorf("Service.Namespace does not match the provided context"))
+func (rs *REST) Update(ctx api.Context, obj runtime.Object) (<-chan apiserver.RESTResult, error) {
+	service := obj.(*api.Service)
+	if !api.ValidNamespace(ctx, &service.ObjectMeta) {
+		return nil, errors.NewConflict("service", service.Namespace, fmt.Errorf("Service.Namespace does not match the provided context"))
 	}
-	if errs := validation.ValidateService(srv); len(errs) > 0 {
-		return nil, errors.NewInvalid("service", srv.ID, errs)
+	if errs := validation.ValidateService(service, rs.registry, ctx); len(errs) > 0 {
+		return nil, errors.NewInvalid("service", service.Name, errs)
 	}
 	return apiserver.MakeAsync(func() (runtime.Object, error) {
-		// TODO: check to see if external load balancer status changed
-		err := rs.registry.UpdateService(ctx, srv)
+		cur, err := rs.registry.GetService(ctx, service.Name)
 		if err != nil {
 			return nil, err
 		}
-		return rs.registry.GetService(ctx, srv.ID)
+		if service.Spec.PortalIP != cur.Spec.PortalIP {
+			// TODO: Would be nice to pass "field is immutable" to users.
+			el := errors.ValidationErrorList{errors.NewFieldInvalid("spec.portalIP", service.Spec.PortalIP)}
+			return nil, errors.NewInvalid("service", service.Name, el)
+		}
+		// Copy over non-user fields.
+		service.Spec.ProxyPort = cur.Spec.ProxyPort
+		// TODO: check to see if external load balancer status changed
+		err = rs.registry.UpdateService(ctx, service)
+		if err != nil {
+			return nil, err
+		}
+		return rs.registry.GetService(ctx, service.Name)
 	}), nil
 }
 
@@ -201,11 +270,13 @@ func (rs *REST) ResourceLocation(ctx api.Context, id string) (string, error) {
 	if len(e.Endpoints) == 0 {
 		return "", fmt.Errorf("no endpoints available for %v", id)
 	}
-	return "http://" + e.Endpoints[rand.Intn(len(e.Endpoints))], nil
+	// We leave off the scheme ('http://') because we have no idea what sort of server
+	// is listening at this endpoint.
+	return e.Endpoints[rand.Intn(len(e.Endpoints))], nil
 }
 
 func (rs *REST) deleteExternalLoadBalancer(service *api.Service) error {
-	if !service.CreateExternalLoadBalancer || rs.cloud == nil {
+	if !service.Spec.CreateExternalLoadBalancer || rs.cloud == nil {
 		return nil
 	}
 	zones, ok := rs.cloud.Zones()
@@ -224,7 +295,7 @@ func (rs *REST) deleteExternalLoadBalancer(service *api.Service) error {
 	if err != nil {
 		return err
 	}
-	if err := balancer.DeleteTCPLoadBalancer(service.TypeMeta.ID, zone.Region); err != nil {
+	if err := balancer.DeleteTCPLoadBalancer(service.Name, zone.Region); err != nil {
 		return err
 	}
 	return nil
@@ -234,21 +305,21 @@ func makeEnvVariableName(str string) string {
 	return strings.ToUpper(strings.Replace(str, "-", "_", -1))
 }
 
-func makeLinkVariables(service api.Service, machine string) []api.EnvVar {
-	prefix := makeEnvVariableName(service.ID)
+func makeLinkVariables(service api.Service) []api.EnvVar {
+	prefix := makeEnvVariableName(service.Name)
 	protocol := string(api.ProtocolTCP)
-	if service.Protocol != "" {
-		protocol = string(service.Protocol)
+	if service.Spec.Protocol != "" {
+		protocol = string(service.Spec.Protocol)
 	}
-	portPrefix := fmt.Sprintf("%s_PORT_%d_%s", prefix, service.Port, strings.ToUpper(protocol))
+	portPrefix := fmt.Sprintf("%s_PORT_%d_%s", prefix, service.Spec.Port, strings.ToUpper(protocol))
 	return []api.EnvVar{
 		{
 			Name:  prefix + "_PORT",
-			Value: fmt.Sprintf("%s://%s:%d", strings.ToLower(protocol), machine, service.Port),
+			Value: fmt.Sprintf("%s://%s:%d", strings.ToLower(protocol), service.Spec.PortalIP, service.Spec.Port),
 		},
 		{
 			Name:  portPrefix,
-			Value: fmt.Sprintf("%s://%s:%d", strings.ToLower(protocol), machine, service.Port),
+			Value: fmt.Sprintf("%s://%s:%d", strings.ToLower(protocol), service.Spec.PortalIP, service.Spec.Port),
 		},
 		{
 			Name:  portPrefix + "_PROTO",
@@ -256,11 +327,11 @@ func makeLinkVariables(service api.Service, machine string) []api.EnvVar {
 		},
 		{
 			Name:  portPrefix + "_PORT",
-			Value: strconv.Itoa(service.Port),
+			Value: strconv.Itoa(service.Spec.Port),
 		},
 		{
 			Name:  portPrefix + "_ADDR",
-			Value: machine,
+			Value: service.Spec.PortalIP,
 		},
 	}
 }

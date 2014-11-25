@@ -19,8 +19,11 @@ ZONE=us-central1-b
 MASTER_SIZE=g1-small
 MINION_SIZE=g1-small
 NUM_MINIONS=2
-# gcloud/gcutil will expand this to the latest supported image.
-IMAGE=backports-debian-7-wheezy
+# TODO(dchen1107): Filed an internal issue to create an alias
+# for containervm image, so that gcloud/gcutil will expand this
+# to the latest supported image.
+IMAGE=container-vm-v20141016
+IMAGE_PROJECT=google-containers
 NETWORK=e2e
 INSTANCE_PREFIX="e2e-test-${USER}"
 MASTER_NAME="${INSTANCE_PREFIX}-master"
@@ -31,3 +34,5 @@ MINION_IP_RANGES=($(eval echo "10.245.{1..${NUM_MINIONS}}.0/24"))
 MINION_SCOPES=""
 # Increase the sleep interval value if concerned about API rate limits. 3, in seconds, is the default.
 POLL_SLEEP_INTERVAL=3
+PORTAL_NET="10.0.0.0/16"
+MONITORING=false

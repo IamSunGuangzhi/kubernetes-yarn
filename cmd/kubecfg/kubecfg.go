@@ -26,11 +26,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"text/template"
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/meta"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubecfg"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
@@ -46,6 +46,7 @@ var (
 	preventSkew   = flag.Bool("expect_version_match", false, "Fail if server's version doesn't match own version.")
 	config        = flag.String("c", "", "Path or URL to the config file, or '-' to read from STDIN")
 	selector      = flag.String("l", "", "Selector (label query) to use for listing")
+	fieldSelector = flag.String("fields", "", "Selector (field query) to use for listing")
 	updatePeriod  = flag.Duration("u", 60*time.Second, "Update interval period")
 	portSpec      = flag.String("p", "", "The port spec, comma-separated list of <external>:<internal>,...")
 	servicePort   = flag.Int("s", -1, "If positive, create and run a corresponding service on this port, only used with 'run'")
@@ -60,6 +61,8 @@ var (
 	imageName     = flag.String("image", "", "Image used when updating a replicationController.  Will apply to the first container in the pod template.")
 	clientConfig  = &client.Config{}
 	openBrowser   = flag.Bool("open_browser", true, "If true, and -proxy is specified, open a browser pointed at the Kubernetes UX. Default true.")
+	ns            = flag.String("ns", "", "If present, the namespace scope for this request.")
+	nsFile        = flag.String("ns_file", os.Getenv("HOME")+"/.kubernetes_ns", "Path to the namespace file")
 )
 
 func init() {
@@ -76,6 +79,7 @@ var parser = kubecfg.NewParser(map[string]runtime.Object{
 	"services":               &api.Service{},
 	"replicationControllers": &api.ReplicationController{},
 	"minions":                &api.Minion{},
+	"events":                 &api.Event{},
 })
 
 func usage() {
@@ -95,6 +99,9 @@ Launch a simple ReplicationController with a single container based
 on the given image:
 
   kubecfg [OPTIONS] [-p <port spec>] run <image> <replicas> <controller>
+
+Manage namespace:
+	kubecfg [OPTIONS] ns [<namespace>]
 
 Options:
 `, prettyWireStorage())
@@ -177,15 +184,26 @@ func main() {
 		clientConfig.Host = os.Getenv("KUBERNETES_MASTER")
 	}
 
-	// TODO: get the namespace context when kubecfg ns is completed
-	ctx := api.NewContext()
+	// Load namespace information for requests
+	// Check if the namespace was overriden by the -ns argument
+	ctx := api.NewDefaultContext()
+	if len(*ns) > 0 {
+		ctx = api.WithNamespace(ctx, *ns)
+	} else {
+		nsInfo, err := kubecfg.LoadNamespaceInfo(*nsFile)
+		if err != nil {
+			glog.Fatalf("Error loading current namespace: %v", err)
+		}
+		ctx = api.WithNamespace(ctx, nsInfo.Namespace)
+	}
 
 	if clientConfig.Host == "" {
 		// TODO: eventually apiserver should start on 443 and be secure by default
+		// TODO: don't specify http or https in Host, and infer that from auth options.
 		clientConfig.Host = "http://localhost:8080"
 	}
-	if client.IsConfigTransportSecure(clientConfig) {
-		auth, err := kubecfg.LoadAuthInfo(*authConfig, os.Stdin)
+	if client.IsConfigTransportTLS(clientConfig) {
+		auth, err := kubecfg.LoadClientAuthInfoOrPrompt(*authConfig, os.Stdin)
 		if err != nil {
 			glog.Fatalf("Error loading auth: %v", err)
 		}
@@ -199,6 +217,9 @@ func main() {
 		}
 		if auth.KeyFile != "" {
 			clientConfig.KeyFile = auth.KeyFile
+		}
+		if auth.BearerToken != "" {
+			clientConfig.BearerToken = auth.BearerToken
 		}
 		if auth.Insecure != nil {
 			clientConfig.Insecure = *auth.Insecure
@@ -244,7 +265,10 @@ func main() {
 				open.Start("http://localhost:8001/static/")
 			}()
 		}
-		server := kubecfg.NewProxyServer(*www, kubeClient)
+		server, err := kubecfg.NewProxyServer(*www, clientConfig)
+		if err != nil {
+			glog.Fatalf("Error creating proxy server: %v", err)
+		}
 		glog.Fatal(server.Serve())
 	}
 
@@ -254,7 +278,7 @@ func main() {
 	}
 	method := flag.Arg(0)
 
-	matchFound := executeAPIRequest(ctx, method, kubeClient) || executeControllerRequest(ctx, method, kubeClient)
+	matchFound := executeAPIRequest(ctx, method, kubeClient) || executeControllerRequest(ctx, method, kubeClient) || executeNamespaceRequest(method, kubeClient)
 	if matchFound == false {
 		glog.Fatalf("Unknown command %s", method)
 	}
@@ -300,13 +324,11 @@ func getPrinter() kubecfg.ResourcePrinter {
 		} else {
 			data = []byte(*templateStr)
 		}
-		tmpl, err := template.New("output").Parse(string(data))
+		var err error
+		printer, err = kubecfg.NewTemplatePrinter(data)
 		if err != nil {
-			glog.Fatalf("Error parsing template %s, %v\n", string(data), err)
+			glog.Fatalf("Error '%v' parsing template:\n'%s'", err, string(data))
 			return nil
-		}
-		printer = &kubecfg.TemplatePrinter{
-			Template: tmpl,
 		}
 	default:
 		printer = humanReadablePrinter()
@@ -346,15 +368,15 @@ func executeAPIRequest(ctx api.Context, method string, c *client.Client) bool {
 			glog.Fatalf("usage: kubecfg [OPTIONS] %s <%s>", method, prettyWireStorage())
 		}
 	case "update":
-		obj, err := c.Verb("GET").Path(path).Do().Get()
+		obj, err := c.Verb("GET").Namespace(api.Namespace(ctx)).Path(path).Do().Get()
 		if err != nil {
 			glog.Fatalf("error obtaining resource version for update: %v", err)
 		}
-		jsonBase, err := runtime.FindTypeMeta(obj)
+		meta, err := meta.Accessor(obj)
 		if err != nil {
 			glog.Fatalf("error finding json base for update: %v", err)
 		}
-		version = jsonBase.ResourceVersion()
+		version = meta.ResourceVersion()
 		verb = "PUT"
 		setBody = true
 		if !validStorage || !hasSuffix {
@@ -372,9 +394,12 @@ func executeAPIRequest(ctx api.Context, method string, c *client.Client) bool {
 		return false
 	}
 
-	r := c.Verb(verb).Path(path)
+	r := c.Verb(verb).Namespace(api.Namespace(ctx)).Path(path)
 	if len(*selector) > 0 {
 		r.ParseSelectorParam("labels", *selector)
+	}
+	if len(*fieldSelector) > 0 {
+		r.ParseSelectorParam("fields", *fieldSelector)
 	}
 	if setBody {
 		if len(version) > 0 {
@@ -383,7 +408,7 @@ func executeAPIRequest(ctx api.Context, method string, c *client.Client) bool {
 			if err != nil {
 				glog.Fatalf("error setting resource version: %v", err)
 			}
-			jsonBase, err := runtime.FindTypeMeta(obj)
+			jsonBase, err := meta.Accessor(obj)
 			if err != nil {
 				glog.Fatalf("error setting resource version: %v", err)
 			}
@@ -457,6 +482,32 @@ func executeControllerRequest(ctx api.Context, method string, c *client.Client) 
 	if err != nil {
 		glog.Fatalf("Error: %v", err)
 	}
+	return true
+}
+
+// executeNamespaceRequest handles client operations for namespaces
+func executeNamespaceRequest(method string, c *client.Client) bool {
+	var err error
+	var ns *kubecfg.NamespaceInfo
+	switch method {
+	case "ns":
+		args := flag.Args()
+		switch len(args) {
+		case 1:
+			ns, err = kubecfg.LoadNamespaceInfo(*nsFile)
+		case 2:
+			ns = &kubecfg.NamespaceInfo{Namespace: args[1]}
+			err = kubecfg.SaveNamespaceInfo(*nsFile, ns)
+		default:
+			glog.Fatalf("usage: kubecfg ns [<namespace>]")
+		}
+	default:
+		return false
+	}
+	if err != nil {
+		glog.Fatalf("Error: %v", err)
+	}
+	fmt.Printf("Using namespace %s\n", ns.Namespace)
 	return true
 }
 

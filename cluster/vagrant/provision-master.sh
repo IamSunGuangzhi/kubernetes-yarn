@@ -70,9 +70,16 @@ grains:
   master_ip: $MASTER_IP
   network_mode: openvswitch
   etcd_servers: $MASTER_IP
+  cloud: vagrant
   cloud_provider: vagrant
   roles:
     - kubernetes-master
+EOF
+
+mkdir -p /srv/salt-overlay/pillar
+cat <<EOF >/srv/salt-overlay/pillar/cluster-params.sls
+  portal_net: $PORTAL_NET
+  cert_ip: $MASTER_IP
 EOF
 
 # Configure the salt-master
@@ -87,7 +94,7 @@ cat <<EOF >/etc/salt/master.d/reactor.conf
 # React to new minions starting by running highstate on them.
 reactor:
   - 'salt/minion/*/start':
-    - /srv/reactor/start.sls
+    - /srv/reactor/highstate-new.sls
 EOF
 
 cat <<EOF >/etc/salt/master.d/salt-output.conf

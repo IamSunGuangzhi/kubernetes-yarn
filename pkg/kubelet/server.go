@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/healthz"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/httplog"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
@@ -53,11 +54,11 @@ func ListenAndServeKubeletServer(host HostInterface, updates chan<- interface{},
 	s := &http.Server{
 		Addr:           net.JoinHostPort(address.String(), strconv.FormatUint(uint64(port), 10)),
 		Handler:        &handler,
-		ReadTimeout:    10 * time.Second,
-		WriteTimeout:   10 * time.Second,
+		ReadTimeout:    5 * time.Minute,
+		WriteTimeout:   5 * time.Minute,
 		MaxHeaderBytes: 1 << 20,
 	}
-	s.ListenAndServe()
+	glog.Fatal(s.ListenAndServe())
 }
 
 // HostInterface contains all the kubelet methods required by the server.
@@ -66,6 +67,7 @@ type HostInterface interface {
 	GetContainerInfo(podFullName, uuid, containerName string, req *info.ContainerInfoRequest) (*info.ContainerInfo, error)
 	GetRootInfo(req *info.ContainerInfoRequest) (*info.ContainerInfo, error)
 	GetMachineInfo() (*info.MachineInfo, error)
+	GetBoundPods() ([]api.BoundPod, error)
 	GetPodInfo(name, uuid string) (api.PodInfo, error)
 	RunInContainer(name, uuid, container string, cmd []string) ([]byte, error)
 	GetKubeletContainerLogs(podFullName, containerName, tail string, follow bool, stdout, stderr io.Writer) error
@@ -90,6 +92,7 @@ func NewServer(host HostInterface, updates chan<- interface{}, enableDebuggingHa
 func (s *Server) InstallDefaultHandlers() {
 	healthz.InstallHandler(s.mux)
 	s.mux.HandleFunc("/podInfo", s.handlePodInfo)
+	s.mux.HandleFunc("/boundPods", s.handleBoundPods)
 	s.mux.HandleFunc("/stats/", s.handleStats)
 	s.mux.HandleFunc("/spec/", s.handleSpec)
 }
@@ -119,15 +122,26 @@ func (s *Server) handleContainer(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	// This is to provide backward compatibility. It only supports a single manifest
-	var pod Pod
-	err = yaml.Unmarshal(data, &pod.Manifest)
+	var pod api.BoundPod
+	var containerManifest api.ContainerManifest
+	err = yaml.Unmarshal(data, &containerManifest)
 	if err != nil {
 		s.error(w, err)
 		return
 	}
+	pod.Name = containerManifest.ID
+	pod.UID = containerManifest.UUID
+	pod.Spec.Containers = containerManifest.Containers
+	pod.Spec.Volumes = containerManifest.Volumes
+	pod.Spec.RestartPolicy = containerManifest.RestartPolicy
 	//TODO: sha1 of manifest?
-	pod.Name = "1"
-	s.updates <- PodUpdate{[]Pod{pod}, SET}
+	if pod.Name == "" {
+		pod.Name = "1"
+	}
+	if pod.UID == "" {
+		pod.UID = "1"
+	}
+	s.updates <- PodUpdate{[]api.BoundPod{pod}, SET}
 
 }
 
@@ -139,16 +153,16 @@ func (s *Server) handleContainers(w http.ResponseWriter, req *http.Request) {
 		s.error(w, err)
 		return
 	}
-	var manifests []api.ContainerManifest
-	err = yaml.Unmarshal(data, &manifests)
+	var specs []api.PodSpec
+	err = yaml.Unmarshal(data, &specs)
 	if err != nil {
 		s.error(w, err)
 		return
 	}
-	pods := make([]Pod, len(manifests))
-	for i := range manifests {
+	pods := make([]api.BoundPod, len(specs))
+	for i := range specs {
 		pods[i].Name = fmt.Sprintf("%d", i+1)
-		pods[i].Manifest = manifests[i]
+		pods[i].Spec = specs[i]
 	}
 	s.updates <- PodUpdate{pods, SET}
 
@@ -164,10 +178,12 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, req *http.Request) {
 	}
 	parts := strings.Split(u.Path, "/")
 
-	var podID, containerName string
-	if len(parts) == 4 {
-		podID = parts[2]
-		containerName = parts[3]
+	// req URI: /containerLogs/<podNamespace>/<podID>/<containerName>
+	var podNamespace, podID, containerName string
+	if len(parts) == 5 {
+		podNamespace = parts[2]
+		podID = parts[3]
+		containerName = parts[4]
 	} else {
 		http.Error(w, "Unexpected path for command running", http.StatusBadRequest)
 		return
@@ -181,16 +197,28 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, `{"message": "Missing container name."}`, http.StatusBadRequest)
 		return
 	}
+	if len(podNamespace) == 0 {
+		http.Error(w, `{"message": "Missing podNamespace."}`, http.StatusBadRequest)
+		return
+	}
 
 	uriValues := u.Query()
 	follow, _ := strconv.ParseBool(uriValues.Get("follow"))
 	tail := uriValues.Get("tail")
 
-	podFullName := GetPodFullName(&Pod{Name: podID, Namespace: "etcd"})
+	podFullName := GetPodFullName(&api.BoundPod{
+		ObjectMeta: api.ObjectMeta{
+			Name:        podID,
+			Namespace:   podNamespace,
+			Annotations: map[string]string{ConfigSourceAnnotationKey: "etcd"},
+		},
+	})
 
 	fw := FlushWriter{writer: w}
-	if flusher, ok := w.(http.Flusher); ok {
+	if flusher, ok := fw.writer.(http.Flusher); ok {
 		fw.flusher = flusher
+	} else {
+		s.error(w, fmt.Errorf("Unable to convert %v into http.Flusher", fw))
 	}
 	w.Header().Set("Transfer-Encoding", "chunked")
 	w.WriteHeader(http.StatusOK)
@@ -199,6 +227,26 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, req *http.Request) {
 		s.error(w, err)
 		return
 	}
+}
+
+// handleBoundPods returns a list of pod bound to the Kubelet and their spec
+func (s *Server) handleBoundPods(w http.ResponseWriter, req *http.Request) {
+	pods, err := s.host.GetBoundPods()
+	if err != nil {
+		s.error(w, err)
+		return
+	}
+	boundPods := &api.BoundPods{
+		Items: pods,
+	}
+	data, err := latest.Codec.Encode(boundPods)
+	if err != nil {
+		s.error(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Header().Add("Content-type", "application/json")
+	w.Write(data)
 }
 
 // handlePodInfo handles podInfo requests against the Kubelet
@@ -210,16 +258,28 @@ func (s *Server) handlePodInfo(w http.ResponseWriter, req *http.Request) {
 	}
 	podID := u.Query().Get("podID")
 	podUUID := u.Query().Get("UUID")
+	podNamespace := u.Query().Get("podNamespace")
 	if len(podID) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
 		http.Error(w, "Missing 'podID=' query entry.", http.StatusBadRequest)
 		return
 	}
+	if len(podNamespace) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		http.Error(w, "Missing 'podNamespace=' query entry.", http.StatusBadRequest)
+		return
+	}
 	// TODO: backwards compatibility with existing API, needs API change
-	podFullName := GetPodFullName(&Pod{Name: podID, Namespace: "etcd"})
+	podFullName := GetPodFullName(&api.BoundPod{
+		ObjectMeta: api.ObjectMeta{
+			Name:        podID,
+			Namespace:   podNamespace,
+			Annotations: map[string]string{ConfigSourceAnnotationKey: "etcd"},
+		},
+	})
 	info, err := s.host.GetPodInfo(podFullName, podUUID)
 	if err == dockertools.ErrNoContainersInPod {
-		http.Error(w, "Pod does not exist", http.StatusNotFound)
+		http.Error(w, "api.BoundPod does not exist", http.StatusNotFound)
 		return
 	}
 	if err != nil {
@@ -271,19 +331,27 @@ func (s *Server) handleRun(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	parts := strings.Split(u.Path, "/")
-	var podID, uuid, container string
-	if len(parts) == 4 {
-		podID = parts[2]
-		container = parts[3]
-	} else if len(parts) == 5 {
-		podID = parts[2]
-		uuid = parts[3]
+	var podNamespace, podID, uuid, container string
+	if len(parts) == 5 {
+		podNamespace = parts[2]
+		podID = parts[3]
 		container = parts[4]
+	} else if len(parts) == 6 {
+		podNamespace = parts[2]
+		podID = parts[3]
+		uuid = parts[4]
+		container = parts[5]
 	} else {
 		http.Error(w, "Unexpected path for command running", http.StatusBadRequest)
 		return
 	}
-	podFullName := GetPodFullName(&Pod{Name: podID, Namespace: "etcd"})
+	podFullName := GetPodFullName(&api.BoundPod{
+		ObjectMeta: api.ObjectMeta{
+			Name:        podID,
+			Namespace:   podNamespace,
+			Annotations: map[string]string{ConfigSourceAnnotationKey: "etcd"},
+		},
+	})
 	command := strings.Split(u.Query().Get("cmd"), " ")
 	data, err := s.host.RunInContainer(podFullName, uuid, container, command)
 	if err != nil {
@@ -327,10 +395,24 @@ func (s *Server) serveStats(w http.ResponseWriter, req *http.Request) {
 		errors.New("pod level status currently unimplemented")
 	case 3:
 		// Backward compatibility without uuid information
-		podFullName := GetPodFullName(&Pod{Name: components[1], Namespace: "etcd"})
+		podFullName := GetPodFullName(&api.BoundPod{
+			ObjectMeta: api.ObjectMeta{
+				Name: components[1],
+				// TODO: I am broken
+				Namespace:   api.NamespaceDefault,
+				Annotations: map[string]string{ConfigSourceAnnotationKey: "etcd"},
+			},
+		})
 		stats, err = s.host.GetContainerInfo(podFullName, "", components[2], &query)
 	case 4:
-		podFullName := GetPodFullName(&Pod{Name: components[1], Namespace: "etcd"})
+		podFullName := GetPodFullName(&api.BoundPod{
+			ObjectMeta: api.ObjectMeta{
+				Name: components[1],
+				// TODO: I am broken
+				Namespace:   "",
+				Annotations: map[string]string{ConfigSourceAnnotationKey: "etcd"},
+			},
+		})
 		stats, err = s.host.GetContainerInfo(podFullName, components[2], components[2], &query)
 	default:
 		http.Error(w, "unknown resource.", http.StatusNotFound)

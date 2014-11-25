@@ -40,8 +40,8 @@ func (c *schedulerCache) List() []interface{} {
 	return c.store.List()
 }
 
-func (c *schedulerCache) Contains() util.StringSet {
-	return c.store.Contains()
+func (c *schedulerCache) ContainedIDs() util.StringSet {
+	return c.store.ContainedIDs()
 }
 
 func (c *schedulerCache) Get(id string) (item interface{}, exists bool) {

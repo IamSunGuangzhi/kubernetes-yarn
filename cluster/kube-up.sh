@@ -37,5 +37,6 @@ verify-prereqs
 kube-up
 
 "${KUBE_ROOT}/cluster/validate-cluster.sh"
+setup-monitoring
 
 echo "Done"

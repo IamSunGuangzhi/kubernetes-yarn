@@ -109,6 +109,11 @@ func (f *FakeDockerClient) StartContainer(id string, hostConfig *docker.HostConf
 	f.Lock()
 	defer f.Unlock()
 	f.called = append(f.called, "start")
+	f.Container = &docker.Container{
+		ID:         id,
+		Config:     &docker.Config{Image: "testimage"},
+		HostConfig: hostConfig,
+	}
 	return f.Err
 }
 
@@ -154,6 +159,17 @@ func (f *FakeDockerClient) PullImage(opts docker.PullImageOptions, auth docker.A
 	f.called = append(f.called, "pull")
 	f.pulled = append(f.pulled, fmt.Sprintf("%s/%s:%s", opts.Repository, opts.Registry, opts.Tag))
 	return f.Err
+}
+
+func (f *FakeDockerClient) Version() (*docker.Env, error) {
+	return &f.VersionInfo, nil
+}
+
+func (f *FakeDockerClient) CreateExec(_ docker.CreateExecOptions) (*docker.Exec, error) {
+	return &docker.Exec{"12345678"}, nil
+}
+func (f *FakeDockerClient) StartExec(_ string, _ docker.StartExecOptions) error {
+	return nil
 }
 
 // FakeDockerPuller is a stub implementation of DockerPuller.

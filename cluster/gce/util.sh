@@ -106,7 +106,7 @@ function upload-server-tars() {
   if which md5 > /dev/null 2>&1; then
     project_hash=$(md5 -q -s "$PROJECT")
   else
-    project_hash=$(echo -n "$PROJECT" | md5sum)
+    project_hash=$(echo -n "$PROJECT" | md5sum | awk '{ print $1 }')
   fi
   project_hash=${project_hash:0:5}
 
@@ -121,10 +121,16 @@ function upload-server-tars() {
   local -r staging_path="${staging_bucket}/devel"
 
   echo "+++ Staging server tars to Google Storage: ${staging_path}"
-  SERVER_BINARY_TAR_URL="${staging_path}/${SERVER_BINARY_TAR##*/}"
-  gsutil -q cp "${SERVER_BINARY_TAR}" "${SERVER_BINARY_TAR_URL}"
-  SALT_TAR_URL="${staging_path}/${SALT_TAR##*/}"
-  gsutil -q cp "${SALT_TAR}" "${SALT_TAR_URL}"
+  local server_binary_gs_url="${staging_path}/${SERVER_BINARY_TAR##*/}"
+  gsutil -q -h "Cache-Control:private, max-age=0" cp "${SERVER_BINARY_TAR}" "${server_binary_gs_url}"
+  gsutil acl ch -g all:R "${server_binary_gs_url}" >/dev/null 2>&1
+  local salt_gs_url="${staging_path}/${SALT_TAR##*/}"
+  gsutil -q -h "Cache-Control:private, max-age=0" cp "${SALT_TAR}" "${salt_gs_url}"
+  gsutil acl ch -g all:R "${salt_gs_url}" >/dev/null 2>&1
+
+  # Convert from gs:// URL to an https:// URL
+  SERVER_BINARY_TAR_URL="${server_binary_gs_url/gs:\/\//https://storage.googleapis.com/}"
+  SALT_TAR_URL="${salt_gs_url/gs:\/\//https://storage.googleapis.com/}"
 }
 
 # Detect the information about the minions
@@ -193,7 +199,8 @@ function get-password {
   KUBE_USER=admin
   KUBE_PASSWORD=$(python -c 'import string,random; print "".join(random.SystemRandom().choice(string.ascii_letters + string.digits) for _ in range(16))')
 
-  # Store password for reuse.
+  # Remove this code, since in all use cases I can see, we are overwriting this
+  # at cluster creation time.
   cat << EOF > "$file"
 {
   "User": "$KUBE_USER",
@@ -201,6 +208,20 @@ function get-password {
 }
 EOF
   chmod 0600 "$file"
+}
+
+# Generate authentication token for admin user. Will
+# read from $HOME/.kubernetes_auth if available.
+#
+# Vars set:
+#   KUBE_ADMIN_TOKEN
+function get-admin-token {
+  local file="$HOME/.kubernetes_auth"
+  if [[ -r "$file" ]]; then
+    KUBE_ADMIN_TOKEN=$(cat "$file" | python -c 'import json,sys;print json.load(sys.stdin)["BearerToken"]')
+    return
+  fi
+  KUBE_ADMIN_TOKEN=$(python -c 'import string,random; print "".join(random.SystemRandom().choice(string.ascii_letters + string.digits) for _ in range(32))')
 }
 
 # Instantiate a kubernetes cluster
@@ -229,6 +250,9 @@ function kube-up {
     # The network needs to be created synchronously or we have a race. The
     # firewalls can be added concurrent with instance creation.
     gcutil addnetwork "${NETWORK}" --range "10.240.0.0/16"
+  fi
+
+  if ! gcutil getfirewall "${NETWORK}-default-internal" >/dev/null 2>&1; then
     gcutil addfirewall "${NETWORK}-default-internal" \
       --project "${PROJECT}" \
       --norespect_terminal_width \
@@ -236,6 +260,9 @@ function kube-up {
       --network "${NETWORK}" \
       --allowed_ip_sources "10.0.0.0/8" \
       --allowed "tcp:1-65535,udp:1-65535,icmp" &
+  fi
+
+  if ! gcutil getfirewall "${NETWORK}-default-ssh" >/dev/null 2>&1; then
     gcutil addfirewall "${NETWORK}-default-ssh" \
       --project "${PROJECT}" \
       --norespect_terminal_width \
@@ -263,10 +290,27 @@ function kube-up {
     echo "readonly SERVER_BINARY_TAR_URL='${SERVER_BINARY_TAR_URL}'"
     echo "readonly SALT_TAR_URL='${SALT_TAR_URL}'"
     echo "readonly MASTER_HTPASSWD='${htpasswd}'"
+    echo "readonly PORTAL_NET='${PORTAL_NET}'"
+    echo "readonly FLUENTD_ELASTICSEARCH='${FLUENTD_ELASTICSEARCH:-false}'"
+    echo "readonly FLUENTD_GCP='${FLUENTD_GCP:-false}'"
+    grep -v "^#" "${KUBE_ROOT}/cluster/gce/templates/common.sh"
     grep -v "^#" "${KUBE_ROOT}/cluster/gce/templates/create-dynamic-salt-files.sh"
     grep -v "^#" "${KUBE_ROOT}/cluster/gce/templates/download-release.sh"
     grep -v "^#" "${KUBE_ROOT}/cluster/gce/templates/salt-master.sh"
   ) > "${KUBE_TEMP}/master-start.sh"
+
+  # Report logging choice (if any).
+  if [[ "${FLUENTD_ELASTICSEARCH-}" == "true" ]]; then
+    echo "+++ Logging using Fluentd to Elasticsearch"
+  fi
+  if [[ "${FLUENTD_GCP-}" == "true" ]]; then
+    echo "+++ Logging using Fluentd to Google Cloud Logging"
+  fi
+
+  # For logging to GCP we need to enable some minion scopes.
+  if [[ "${FLUENTD_GCP-}" == "true" ]]; then
+     MINION_SCOPES="${MINION_SCOPES}, https://www.googleapis.com/auth/logging.write"
+  fi
 
   gcutil addinstance "${MASTER_NAME}" \
     --project "${PROJECT}" \
@@ -274,7 +318,7 @@ function kube-up {
     --sleep_between_polls "${POLL_SLEEP_INTERVAL}" \
     --zone "${ZONE}" \
     --machine_type "${MASTER_SIZE}" \
-    --image "${IMAGE}" \
+    --image "projects/${IMAGE_PROJECT}/global/images/${IMAGE}" \
     --tags "${MASTER_TAG}" \
     --network "${NETWORK}" \
     --service_account_scopes="storage-ro,compute-rw" \
@@ -286,6 +330,7 @@ function kube-up {
       echo "#! /bin/bash"
       echo "MASTER_NAME='${MASTER_NAME}'"
       echo "MINION_IP_RANGE='${MINION_IP_RANGES[$i]}'"
+      grep -v "^#" "${KUBE_ROOT}/cluster/gce/templates/common.sh"
       grep -v "^#" "${KUBE_ROOT}/cluster/gce/templates/salt-minion.sh"
     ) > "${KUBE_TEMP}/minion-start-${i}.sh"
 
@@ -303,7 +348,7 @@ function kube-up {
       --sleep_between_polls "${POLL_SLEEP_INTERVAL}" \
       --zone "${ZONE}" \
       --machine_type "${MINION_SIZE}" \
-      --image "${IMAGE}" \
+      --image "projects/${IMAGE_PROJECT}/global/images/${IMAGE}" \
       --tags "${MINION_TAG}" \
       --network "${NETWORK}" \
       --service_account_scopes "${MINION_SCOPES}" \
@@ -374,10 +419,12 @@ function kube-up {
   local kube_key=".kubecfg.key"
   local ca_cert=".kubernetes.ca.crt"
 
+  # TODO: generate ADMIN (and KUBELET) tokens and put those in the master's
+  # config file.  Distribute the same way the htpasswd is done.
   (umask 077
-   gcutil ssh "${MASTER_NAME}" sudo cat /usr/share/nginx/kubecfg.crt >"${HOME}/${kube_cert}" 2>/dev/null
-   gcutil ssh "${MASTER_NAME}" sudo cat /usr/share/nginx/kubecfg.key >"${HOME}/${kube_key}" 2>/dev/null
-   gcutil ssh "${MASTER_NAME}" sudo cat /usr/share/nginx/ca.crt >"${HOME}/${ca_cert}" 2>/dev/null
+   gcutil ssh "${MASTER_NAME}" sudo cat /srv/kubernetes/kubecfg.crt >"${HOME}/${kube_cert}" 2>/dev/null
+   gcutil ssh "${MASTER_NAME}" sudo cat /srv/kubernetes/kubecfg.key >"${HOME}/${kube_key}" 2>/dev/null
+   gcutil ssh "${MASTER_NAME}" sudo cat /srv/kubernetes/ca.crt >"${HOME}/${ca_cert}" 2>/dev/null
 
    cat << EOF > ~/.kubernetes_auth
 {
@@ -458,6 +505,7 @@ function kube-push {
     echo "cd /var/cache/kubernetes-install"
     echo "readonly SERVER_BINARY_TAR_URL='${SERVER_BINARY_TAR_URL}'"
     echo "readonly SALT_TAR_URL='${SALT_TAR_URL}'"
+    grep -v "^#" "${KUBE_ROOT}/cluster/gce/templates/common.sh"
     grep -v "^#" "${KUBE_ROOT}/cluster/gce/templates/download-release.sh"
     echo "echo Executing configuration"
     echo "sudo salt '*' mine.update"
@@ -493,7 +541,6 @@ function test-build-release {
 #
 # Assumed vars:
 #   PROJECT
-#   ALREADY_UP
 #   Variables from config.sh
 function test-setup {
 
@@ -501,18 +548,15 @@ function test-setup {
   # gce specific
   detect-project
 
-  if [[ ${ALREADY_UP} -ne 1 ]]; then
-    # Open up port 80 & 8080 so common containers on minions can be reached
-    gcutil addfirewall \
-      --project "${PROJECT}" \
-      --norespect_terminal_width \
-      --sleep_between_polls "${POLL_SLEEP_INTERVAL}" \
-      --target_tags "${MINION_TAG}" \
-      --allowed tcp:80,tcp:8080 \
-      --network "${NETWORK}" \
-      "${MINION_TAG}-${INSTANCE_PREFIX}-http-alt"
-  fi
-
+  # Open up port 80 & 8080 so common containers on minions can be reached
+  gcutil addfirewall \
+    --project "${PROJECT}" \
+    --norespect_terminal_width \
+    --sleep_between_polls "${POLL_SLEEP_INTERVAL}" \
+    --target_tags "${MINION_TAG}" \
+    --allowed tcp:80,tcp:8080 \
+    --network "${NETWORK}" \
+    "${MINION_TAG}-${INSTANCE_PREFIX}-http-alt"
 }
 
 # Execute after running tests to perform any required clean-up.  This is called
@@ -529,4 +573,81 @@ function test-teardown {
     --force \
     "${MINION_TAG}-${INSTANCE_PREFIX}-http-alt" || true > /dev/null
   "${KUBE_ROOT}/cluster/kube-down.sh" > /dev/null
+}
+
+# SSH to a node by name ($1) and run a command ($2).
+function ssh-to-node {
+  local node="$1"
+  local cmd="$2"
+  gcutil --log_level=WARNING ssh --ssh_arg "-o LogLevel=quiet" "${node}" "${cmd}"
+}
+
+# Restart the kube-proxy on a node ($1)
+function restart-kube-proxy {
+  ssh-to-node "$1" "sudo /etc/init.d/kube-proxy restart"
+}
+
+# Setup monitoring using heapster and InfluxDB
+function setup-monitoring {
+  if [[ "${MONITORING}" == "true" ]]; then
+  	echo "Setting up cluster monitoring using Heapster."
+
+  	if ! gcutil getfirewall monitoring-heapster &> /dev/null; then
+	    if ! gcutil addfirewall monitoring-heapster \
+      		--project "${PROJECT}" \
+      		--norespect_terminal_width \
+      		--sleep_between_polls "${POLL_SLEEP_INTERVAL}" \
+      		--target_tags="${MINION_TAG}" \
+      		--allowed "tcp:80,tcp:8083,tcp:8086,tcp:9200" &> /dev/null; then
+    		echo "Failed to set up firewall for monitoring" && false
+	    fi
+  	fi
+
+  	# Re-use master auth for Grafana
+  	get-password
+    ensure-temp-dir
+
+    cp "${KUBE_ROOT}/examples/monitoring/influx-grafana-pod.json" "${KUBE_TEMP}/influx-grafana-pod.0.json"
+  	sed "s/HTTP_USER, \"value\": \"[^\"]*\"/HTTP_USER, \"value\": \"$KUBE_USER\"/g" \
+      "${KUBE_TEMP}/influx-grafana-pod.0.json" > "${KUBE_TEMP}/influx-grafana-pod.1.json"
+  	sed "s/HTTP_PASS, \"value\": \"[^\"]*\"/HTTP_PASS, \"value\": \"$KUBE_PASSWORD\"/g" \
+      "${KUBE_TEMP}/influx-grafana-pod.1.json" > "${KUBE_TEMP}/influx-grafana-pod.2.json"
+    local kubectl="${KUBE_ROOT}/cluster/kubectl.sh"
+  	if "${kubectl}" create -f "${KUBE_TEMP}/influx-grafana-pod.2.json" &> /dev/null \
+  	    && "${kubectl}" create -f "${KUBE_ROOT}/examples/monitoring/influx-grafana-service.json" &> /dev/null \
+  	    && "${kubectl}" create -f "${KUBE_ROOT}/examples/monitoring/heapster-pod.json" &> /dev/null; then
+	    local dashboard_url="http://$(${kubectl} get -o json pod influx-grafana | grep hostIP | awk '{print $2}' | sed 's/[,|\"]//g')"
+	    echo
+	    echo "Grafana dashboard will be available at $dashboard_url. Wait for the monitoring dashboard to be online."
+	    echo "Use the master user name and password for the dashboard."
+	    echo
+  	else
+	    echo "Failed to Setup Monitoring"
+	    teardown-monitoring
+  	fi
+  fi
+}
+
+function teardown-monitoring {
+  if [[ "${MONITORING}" == "true" ]]; then
+    detect-project
+
+    local kubectl="${KUBE_ROOT}/cluster/kubectl.sh"
+    "${kubectl}" delete pods heapster &> /dev/null || true
+    "${kubectl}" delete pods influx-grafana &> /dev/null || true
+    "${kubectl}" delete services influx-master &> /dev/null || true
+    if gcutil getfirewall monitoring-heapster &> /dev/null; then
+      gcutil deletefirewall  \
+      	--project "${PROJECT}" \
+      	--norespect_terminal_width \
+      	--sleep_between_polls "${POLL_SLEEP_INTERVAL}" \
+      	--force \
+      	monitoring-heapster &> /dev/null || true
+    fi
+  fi
+}
+
+# Perform preparations required to run e2e tests
+function prepare-e2e() {
+  detect-project
 }
