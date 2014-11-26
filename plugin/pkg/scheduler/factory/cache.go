@@ -33,6 +33,8 @@ func (c *schedulerCache) Delete(id string) {
 
 	if statefulScheduler, ok := c.scheduler.(scheduler.StatefulScheduler); ok {
 		statefulScheduler.Delete(id)
+	} else {
+		glog.V(0).Infof("scheduler does not support deletes. this will likely lead to container leaks.")
 	}
 }
 

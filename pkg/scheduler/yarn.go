@@ -155,12 +155,13 @@ func YARNInit(handler *yarnSchedulerCallbackHandler) (*yarn_client.YarnClient, *
 }
 
 func (yarnScheduler *YARNScheduler) Delete(id string) error {
-	log.Printf("attempting to delete pods with id: %s", id)
+	log.Printf("attempting to delete pod with id: %s", id)
 	rmClient := yarnScheduler.rmClient
 	containerId, found := yarnScheduler.podsToContainersMap[id]
 
 	if !found {
-		return errors.New("attempting to delete a pod that doesn't have an associated container")
+		log.Println("attempting to delete a pod that doesn't have an associated YARN container!")
+		return errors.New("attempting to delete a pod that doesn't have an associated YARN container!")
 	}
 
 	rmClient.ReleaseAssignedContainer(containerId)
@@ -220,7 +221,8 @@ func (yarnScheduler *YARNScheduler) Schedule(pod api.Pod, minionLister MinionLis
 			numAllocatedContainers++
 			log.Println("#containers allocated so far: ", numAllocatedContainers)
 
-			yarnScheduler.podsToContainersMap[pod.UID] = container.GetId()
+			log.Printf("pod=%s YARN container=%v", pod.Name, container.GetId())
+			yarnScheduler.podsToContainersMap[pod.Name] = container.GetId()
 			host := *container.NodeId.Host
 			log.Println("allocated container on: ", host)
 
