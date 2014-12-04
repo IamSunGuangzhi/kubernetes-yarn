@@ -116,9 +116,8 @@ func YARNInit(handler *yarnSchedulerCallbackHandler) (*yarn_client.YarnClient, *
 	if amRmToken != nil {
 		savedAmRmToken := *amRmToken
 		service, _ := conf.GetRMSchedulerAddress()
-		savedAmRmToken.Service = &service
 		log.Println("Saving token with address: ", service)
-		security.GetCurrentUser().AddUserToken(&savedAmRmToken)
+		security.GetCurrentUser().AddUserTokenWithAlias(service, &savedAmRmToken)
 	}
 
 	log.Println("Application in state ", appState)
@@ -187,10 +186,13 @@ func (yarnScheduler *YARNScheduler) Delete(id string) error {
 	return errors.New("failed to release container!")
 }
 
+//allocates one "fat" container.
 func (yarnScheduler *YARNScheduler) Schedule(pod api.Pod, minionLister MinionLister) (string, error) {
 	rmClient := yarnScheduler.rmClient
 
 	// Add resource requests
+	// Even though we only allocate one container for now, this could change in the future.
+
 	const numContainers = int32(1)
 	memory := int32(128)
 	resource := hadoop_yarn.ResourceProto{Memory: &memory}
@@ -224,9 +226,25 @@ func (yarnScheduler *YARNScheduler) Schedule(pod api.Pod, minionLister MinionLis
 			log.Printf("pod=%s YARN container=%v", pod.Name, container.GetId())
 			yarnScheduler.podsToContainersMap[pod.Name] = container.GetId()
 			host := *container.NodeId.Host
+			port := *container.NodeId.Port
 			log.Println("allocated container on: ", host)
 
+			//launch a "sleep" container so that the "loop" is completed and YARN doesn't deallocate the container
+			containerLaunchContext := hadoop_yarn.ContainerLaunchContextProto{Command: []string{"while :; do sleep 1; done"}}
+			nmClient, err := yarn_client.CreateAMNMClient(host, int(port))
+			if err != nil {
+				log.Fatal("Failed to create AMNMClient! ", err)
+			}
+			log.Printf("Successfully created nmClient: %v", nmClient)
+      log.Printf("Attempting to start container on %s", host)
+
+			err = nmClient.StartContainer(container, &containerLaunchContext)
+			if err != nil {
+				log.Fatal("failed to start container! ", err)
+			}
+
 			//We have the hostname available. return from here.
+			//This many change in case we allocate more than one container in the future.
 			return findMinionForHost(host, minionLister)
 		}
 
