@@ -98,7 +98,7 @@
 		},
 		{
 			"ImportPath": "github.com/hortonworks/gohadoop",
-			"Rev": "f0eef8a43507ef5c31f9aea68f08f3cbc0a1f8e9"
+			"Rev": "7880051566f93e48a843d40bc105e4c0044fde65"
 		},
 		{
 			"ImportPath": "github.com/kr/text",
@@ -129,8 +129,8 @@
 		{
 			"ImportPath": "github.com/skratchdot/open-golang/open",
 			"Rev": "ba570a111973b539baf23c918213059543b5bb6e"
-    },
-    {	
+		},
+		{
 			"ImportPath": "github.com/nu7hatch/gouuid",
 			"Rev": "179d4d0c4d8d407a32af483c2354df1d2c91e6c3"
 		},

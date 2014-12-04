@@ -14,7 +14,7 @@ import (
 type UserGroupInformation struct {
 	rwMutex    sync.RWMutex
 	userInfo   *hadoop_common.UserInformationProto
-	userTokens []*hadoop_common.TokenProto
+	userTokens map[string]*hadoop_common.TokenProto
 }
 
 var once sync.Once
@@ -34,7 +34,7 @@ func CreateCurrentUserInfoProto() (*hadoop_common.UserInformationProto, error) {
 	return &hadoop_common.UserInformationProto{EffectiveUser: nil, RealUser: &username}, nil
 }
 
-func Allocate(userInfo *hadoop_common.UserInformationProto, userTokens []*hadoop_common.TokenProto) *UserGroupInformation {
+func Allocate(userInfo *hadoop_common.UserInformationProto, userTokens map[string]*hadoop_common.TokenProto) *UserGroupInformation {
 	ugi := new(UserGroupInformation)
 
 	if userInfo != nil {
@@ -47,7 +47,7 @@ func Allocate(userInfo *hadoop_common.UserInformationProto, userTokens []*hadoop
 	if userTokens != nil {
 		ugi.userTokens = userTokens
 	} else {
-		ugi.userTokens = make([]*hadoop_common.TokenProto, 0, maxTokens) //empty, with room for maxTokens tokens.
+		ugi.userTokens = make(map[string]*hadoop_common.TokenProto) //empty, with room for maxTokens tokens.
 	}
 
 	return ugi
@@ -63,17 +63,30 @@ func (ugi *UserGroupInformation) GetUserInformation() *hadoop_common.UserInforma
 	return ugi.userInfo
 }
 
-func (ugi *UserGroupInformation) GetUserTokens() []*hadoop_common.TokenProto {
+func (ugi *UserGroupInformation) GetUserTokens() map[string]*hadoop_common.TokenProto {
 	return ugi.userTokens
 }
 
-func (ugi *UserGroupInformation) AddUserToken(token *hadoop_common.TokenProto) {
+func (ugi *UserGroupInformation) AddUserTokenWithAlias(alias string, token *hadoop_common.TokenProto) {
+	if token == nil {
+		log.Fatal("supplied token is nil!")
+		return
+	}
+
 	if length := len(ugi.userTokens); length < maxTokens {
-		//ref: http://blog.golang.org/slices
-		ugi.userTokens = append(ugi.userTokens, token)
+		ugi.userTokens[alias] = token
 	} else {
 		log.Fatal("user already has maxTokens:", maxTokens)
 	}
+}
+
+func (ugi *UserGroupInformation) AddUserToken(token *hadoop_common.TokenProto) {
+	if token == nil {
+		log.Fatal("supplied token is nil!")
+		return
+	}
+
+	ugi.AddUserTokenWithAlias(token.GetService(), token)
 }
 
 func GetCurrentUser() *UserGroupInformation {

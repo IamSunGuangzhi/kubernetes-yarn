@@ -1,10 +1,13 @@
 package yarn_client
 
 import (
-	"github.com/hortonworks/gohadoop/hadoop_yarn"
-	yarn_conf "github.com/hortonworks/gohadoop/hadoop_yarn/conf"
+	"fmt"
 	"log"
 	"sync"
+
+	"github.com/hortonworks/gohadoop/hadoop_common/security"
+	"github.com/hortonworks/gohadoop/hadoop_yarn"
+	yarn_conf "github.com/hortonworks/gohadoop/hadoop_yarn/conf"
 )
 
 type AMRMClient struct {
@@ -107,6 +110,20 @@ func (c *AMRMClient) Allocate() (*hadoop_yarn.AllocateResponseProto, error) {
 	request := hadoop_yarn.AllocateRequestProto{ApplicationAttemptId: c.applicationAttemptId, Ask: asks, Release: releases, ResponseId: &c.responseId}
 	response := hadoop_yarn.AllocateResponseProto{}
 	err := c.client.Allocate(&request, &response)
+
+	if err == nil {
+		for _, nmToken := range response.GetNmTokens() {
+			if nmToken != nil {
+				log.Printf("saving nm token : %v", nmToken)
+
+				savedNmToken := *(nmToken.Token)
+				serviceStr := fmt.Sprintf("%s%s%d", *nmToken.NodeId.Host, ":", *nmToken.NodeId.Port)
+				savedNmToken.Service = &serviceStr
+				log.Printf("saving token %v for service %v", &savedNmToken, serviceStr)
+				security.GetCurrentUser().AddUserTokenWithAlias(serviceStr, &savedNmToken)
+			}
+		}
+	}
 
 	return &response, err
 }

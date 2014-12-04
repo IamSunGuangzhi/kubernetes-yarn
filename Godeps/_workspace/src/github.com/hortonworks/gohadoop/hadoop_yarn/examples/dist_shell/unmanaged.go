@@ -1,13 +1,13 @@
 package main
 
 import (
-	"fmt"
+	"log"
+	"time"
+
 	"github.com/hortonworks/gohadoop/hadoop_common/security"
 	"github.com/hortonworks/gohadoop/hadoop_yarn"
 	"github.com/hortonworks/gohadoop/hadoop_yarn/conf"
 	"github.com/hortonworks/gohadoop/hadoop_yarn/yarn_client"
-	"log"
-	"time"
 )
 
 func main() {
@@ -65,8 +65,7 @@ func main() {
 		savedAmRmToken := *amRmToken
 		//in the unmanaged AM scenario, the returned token does NOT have the "service" field set
 		service, _ := conf.GetRMSchedulerAddress()
-		savedAmRmToken.Service = &service
-		security.GetCurrentUser().AddUserToken(&savedAmRmToken)
+		security.GetCurrentUser().AddUserTokenWithAlias(service, &savedAmRmToken)
 	}
 
 	log.Println("Application in state ", appState)
@@ -123,17 +122,6 @@ func main() {
 		allocateResponse, err = rmClient.Allocate()
 		if err == nil {
 			log.Println("allocateResponse: ", *allocateResponse)
-		}
-
-		for _, nmToken := range allocateResponse.GetNmTokens() {
-			if nmToken != nil {
-				savedNmToken := *(nmToken.Token)
-				//service is already available in the nmToken. But, it is
-				serviceStr := fmt.Sprintf("%s%s%d", *nmToken.NodeId.Host, ":", *nmToken.NodeId.Port)
-				savedNmToken.Service = &serviceStr
-				log.Printf("saving token %v for service %v", &savedNmToken, serviceStr)
-				security.GetCurrentUser().AddUserToken(&savedNmToken)
-			}
 		}
 
 		for _, container := range allocateResponse.AllocatedContainers {

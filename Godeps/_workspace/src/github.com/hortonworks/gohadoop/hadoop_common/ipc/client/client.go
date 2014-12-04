@@ -29,6 +29,7 @@ type connection struct {
 type connection_id struct {
 	user     string
 	protocol string
+	address  string
 }
 
 type call struct {
@@ -56,7 +57,7 @@ var (
 
 func (c *Client) Call(rpc *hadoop_common.RequestHeaderProto, rpcRequest proto.Message, rpcResponse proto.Message) error {
 	// Create connection_id
-	connectionId := connection_id{user: *c.Ugi.RealUser, protocol: *rpc.DeclaringClassProtocolName}
+	connectionId := connection_id{user: *c.Ugi.RealUser, protocol: *rpc.DeclaringClassProtocolName, address: c.ServerAddress}
 
 	// Get connection to server
 	//log.Println("Connecting...", c)
@@ -93,10 +94,9 @@ func findUsableTokenForService(service string) (*hadoop_common.TokenProto, bool)
 		return nil, false
 	}
 
-	for _, token := range userTokens {
-		if token.GetService() == service {
-			return token, true
-		}
+	token := userTokens[service]
+	if token != nil {
+		return token, true
 	}
 
 	return nil, false
