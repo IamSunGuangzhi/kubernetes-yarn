@@ -14,6 +14,10 @@ At least [Docker](https://docs.docker.com/installation/#installation) 1.0.0+. En
 
 You need an [etcd](https://github.com/coreos/etcd/releases/tag/v0.4.6) in your path, please make sure it is installed and in your ``$PATH``.
 
+#### go
+
+You need [go](https://golang.org/doc/install) in your path, please make sure it is installed and in your ``$PATH``.
+
 ### Starting the cluster
 
 In a separate tab of your terminal, run:
@@ -45,7 +49,7 @@ You can now use any of the cluster/kubecfg.sh commands to interact with your loc
 cluster/kubecfg.sh list /pods
 cluster/kubecfg.sh list /services
 cluster/kubecfg.sh list /replicationControllers
-cluster/kubecfg.sh -p 8080:80 run dockerfile/nginx 1 myNginx
+cluster/kubecfg.sh -p 8081:80 run dockerfile/nginx 1 myNginx
 
 
 ## begin wait for provision to complete, you can monitor the docker pull by opening a new terminal

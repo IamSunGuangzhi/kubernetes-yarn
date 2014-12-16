@@ -25,6 +25,15 @@ import (
 )
 
 func init() {
+	// Our TypeMeta was split into two different structs.
+	newer.Scheme.AddStructFieldConversion(TypeMeta{}, "TypeMeta", newer.TypeMeta{}, "TypeMeta")
+	newer.Scheme.AddStructFieldConversion(TypeMeta{}, "TypeMeta", newer.ObjectMeta{}, "ObjectMeta")
+	newer.Scheme.AddStructFieldConversion(TypeMeta{}, "TypeMeta", newer.ListMeta{}, "ListMeta")
+
+	newer.Scheme.AddStructFieldConversion(newer.TypeMeta{}, "TypeMeta", TypeMeta{}, "TypeMeta")
+	newer.Scheme.AddStructFieldConversion(newer.ObjectMeta{}, "ObjectMeta", TypeMeta{}, "TypeMeta")
+	newer.Scheme.AddStructFieldConversion(newer.ListMeta{}, "ListMeta", TypeMeta{}, "TypeMeta")
+
 	newer.Scheme.AddConversionFuncs(
 		// TypeMeta must be split into two objects
 		func(in *newer.TypeMeta, out *TypeMeta, s conversion.Scope) error {
@@ -90,8 +99,8 @@ func init() {
 			return s.Convert(&in.Annotations, &out.Annotations, 0)
 		},
 
-		// Convert all to the new PodCondition constants
-		func(in *newer.PodCondition, out *PodStatus, s conversion.Scope) error {
+		// Convert all to the new PodPhase constants
+		func(in *newer.PodPhase, out *PodStatus, s conversion.Scope) error {
 			switch *in {
 			case "":
 				*out = ""
@@ -104,13 +113,13 @@ func init() {
 			case newer.PodFailed:
 				*out = PodTerminated
 			default:
-				return errors.New("The string provided is not a valid PodCondition constant value")
+				return errors.New("The string provided is not a valid PodPhase constant value")
 			}
 
 			return nil
 		},
 
-		func(in *PodStatus, out *newer.PodCondition, s conversion.Scope) error {
+		func(in *PodStatus, out *newer.PodPhase, s conversion.Scope) error {
 			switch *in {
 			case "":
 				*out = ""
@@ -119,10 +128,10 @@ func init() {
 			case PodRunning:
 				*out = newer.PodRunning
 			case PodTerminated:
-				// Older API versions did not contain enough info to map to PodFailed
+				// Older API versions did not contain enough info to map to PodSucceeded
 				*out = newer.PodFailed
 			default:
-				return errors.New("The string provided is not a valid PodCondition constant value")
+				return errors.New("The string provided is not a valid PodPhase constant value")
 			}
 			return nil
 		},
@@ -135,18 +144,17 @@ func init() {
 			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
 				return err
 			}
+			// TODO: Change this to use in.ObjectMeta.Labels.
 			if err := s.Convert(&in.Labels, &out.Labels, 0); err != nil {
 				return err
 			}
-
-			if err := s.Convert(&in.DesiredState, &out.DesiredState, 0); err != nil {
+			if err := s.Convert(&in.Spec, &out.DesiredState.Manifest, 0); err != nil {
 				return err
 			}
-			if err := s.Convert(&in.CurrentState, &out.CurrentState, 0); err != nil {
+			if err := s.Convert(&in.Status, &out.CurrentState, 0); err != nil {
 				return err
 			}
-
-			if err := s.Convert(&in.NodeSelector, &out.NodeSelector, 0); err != nil {
+			if err := s.Convert(&in.Spec.NodeSelector, &out.NodeSelector, 0); err != nil {
 				return err
 			}
 			return nil
@@ -161,15 +169,13 @@ func init() {
 			if err := s.Convert(&in.Labels, &out.Labels, 0); err != nil {
 				return err
 			}
-
-			if err := s.Convert(&in.DesiredState, &out.DesiredState, 0); err != nil {
+			if err := s.Convert(&in.DesiredState.Manifest, &out.Spec, 0); err != nil {
 				return err
 			}
-			if err := s.Convert(&in.CurrentState, &out.CurrentState, 0); err != nil {
+			if err := s.Convert(&in.CurrentState, &out.Status, 0); err != nil {
 				return err
 			}
-
-			if err := s.Convert(&in.NodeSelector, &out.NodeSelector, 0); err != nil {
+			if err := s.Convert(&in.NodeSelector, &out.Spec.NodeSelector, 0); err != nil {
 				return err
 			}
 			return nil
@@ -282,6 +288,43 @@ func init() {
 			return nil
 		},
 
+		func(in *newer.PodStatus, out *PodState, s conversion.Scope) error {
+			if err := s.Convert(&in.Phase, &out.Status, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Info, &out.Info, 0); err != nil {
+				return err
+			}
+			out.Host = in.Host
+			out.HostIP = in.HostIP
+			out.PodIP = in.PodIP
+			return nil
+		},
+		func(in *PodState, out *newer.PodStatus, s conversion.Scope) error {
+			if err := s.Convert(&in.Status, &out.Phase, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Info, &out.Info, 0); err != nil {
+				return err
+			}
+			out.Host = in.Host
+			out.HostIP = in.HostIP
+			out.PodIP = in.PodIP
+			return nil
+		},
+
+		func(in *newer.PodSpec, out *PodState, s conversion.Scope) error {
+			if err := s.Convert(&in, &out.Manifest, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *PodState, out *newer.PodSpec, s conversion.Scope) error {
+			if err := s.Convert(&in.Manifest, &out, 0); err != nil {
+				return err
+			}
+			return nil
+		},
 		func(in *newer.Service, out *Service, s conversion.Scope) error {
 			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
 				return err
@@ -331,62 +374,6 @@ func init() {
 			return nil
 		},
 
-		func(in *newer.Binding, out *Binding, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-
-			out.PodID = in.PodID
-			out.Host = in.Host
-
-			return nil
-		},
-		func(in *Binding, out *newer.Binding, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
-				return err
-			}
-
-			out.PodID = in.PodID
-			out.Host = in.Host
-
-			return nil
-		},
-
-		func(in *newer.Status, out *Status, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-
-			out.Code = in.Code
-			out.Message = in.Message
-			out.Reason = StatusReason(in.Reason)
-			out.Status = in.Status
-			return s.Convert(&in.Details, &out.Details, 0)
-		},
-		func(in *Status, out *newer.Status, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
-				return err
-			}
-
-			out.Code = in.Code
-			out.Message = in.Message
-			out.Reason = newer.StatusReason(in.Reason)
-			out.Status = in.Status
-			return s.Convert(&in.Details, &out.Details, 0)
-		},
-
 		func(in *newer.Minion, out *Minion, s conversion.Scope) error {
 			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
 				return err
@@ -394,12 +381,12 @@ func init() {
 			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
 				return err
 			}
-			if err := s.Convert(&in.Labels, &out.Labels, 0); err != nil {
+			if err := s.Convert(&in.ObjectMeta.Labels, &out.Labels, 0); err != nil {
 				return err
 			}
 
-			out.HostIP = in.HostIP
-			return s.Convert(&in.NodeResources, &out.NodeResources, 0)
+			out.HostIP = in.Status.HostIP
+			return s.Convert(&in.Spec.Capacity, &out.NodeResources.Capacity, 0)
 		},
 		func(in *Minion, out *newer.Minion, s conversion.Scope) error {
 			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
@@ -408,278 +395,12 @@ func init() {
 			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
 				return err
 			}
-			if err := s.Convert(&in.Labels, &out.Labels, 0); err != nil {
+			if err := s.Convert(&in.Labels, &out.ObjectMeta.Labels, 0); err != nil {
 				return err
 			}
 
-			out.HostIP = in.HostIP
-			return s.Convert(&in.NodeResources, &out.NodeResources, 0)
-		},
-
-		func(in *newer.BoundPod, out *BoundPod, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-
-			return s.Convert(&in.Spec, &out.Spec, 0)
-		},
-		func(in *BoundPod, out *newer.BoundPod, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
-				return err
-			}
-
-			return s.Convert(&in.Spec, &out.Spec, 0)
-		},
-
-		func(in *newer.BoundPods, out *BoundPods, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			out.Host = in.Host
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-		func(in *BoundPods, out *newer.BoundPods, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
-				return err
-			}
-			out.Host = in.Host
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-
-		func(in *newer.Endpoints, out *Endpoints, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-
-			return s.Convert(&in.Endpoints, &out.Endpoints, 0)
-		},
-		func(in *Endpoints, out *newer.Endpoints, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
-				return err
-			}
-
-			return s.Convert(&in.Endpoints, &out.Endpoints, 0)
-		},
-
-		func(in *newer.ServerOp, out *ServerOp, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			return nil
-		},
-		func(in *ServerOp, out *newer.ServerOp, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
-				return err
-			}
-			return nil
-		},
-
-		func(in *newer.Event, out *Event, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-
-			out.Message = in.Message
-			out.Reason = in.Reason
-			out.Source = in.Source
-			out.Status = in.Status
-			out.Timestamp = in.Timestamp
-			return s.Convert(&in.InvolvedObject, &out.InvolvedObject, 0)
-		},
-		func(in *Event, out *newer.Event, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
-				return err
-			}
-
-			out.Message = in.Message
-			out.Reason = in.Reason
-			out.Source = in.Source
-			out.Status = in.Status
-			out.Timestamp = in.Timestamp
-			return s.Convert(&in.InvolvedObject, &out.InvolvedObject, 0)
-		},
-
-		// Convert all the standard lists
-		func(in *newer.PodList, out *PodList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ListMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-		func(in *PodList, out *newer.PodList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ListMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-
-		func(in *newer.ReplicationControllerList, out *ReplicationControllerList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ListMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-		func(in *ReplicationControllerList, out *newer.ReplicationControllerList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ListMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-
-		func(in *newer.ServiceList, out *ServiceList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ListMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-		func(in *ServiceList, out *newer.ServiceList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ListMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-
-		func(in *newer.EndpointsList, out *EndpointsList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ListMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-		func(in *EndpointsList, out *newer.EndpointsList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ListMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-
-		func(in *newer.EventList, out *EventList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ListMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-		func(in *EventList, out *newer.EventList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ListMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-
-		func(in *newer.MinionList, out *MinionList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ListMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-		func(in *MinionList, out *newer.MinionList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ListMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-
-		func(in *newer.ServerOpList, out *ServerOpList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ListMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-		func(in *ServerOpList, out *newer.ServerOpList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ListMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-
-		func(in *newer.ContainerManifestList, out *ContainerManifestList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.ListMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
-		},
-		func(in *ContainerManifestList, out *newer.ContainerManifestList, s conversion.Scope) error {
-			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
-				return err
-			}
-			if err := s.Convert(&in.TypeMeta, &out.ListMeta, 0); err != nil {
-				return err
-			}
-			return s.Convert(&in.Items, &out.Items, 0)
+			out.Status.HostIP = in.HostIP
+			return s.Convert(&in.NodeResources.Capacity, &out.Spec.Capacity, 0)
 		},
 
 		// Object ID <-> Name

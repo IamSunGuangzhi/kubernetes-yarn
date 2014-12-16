@@ -216,7 +216,7 @@ func podsOnMinions(c *client.Client, pods api.PodList) wait.ConditionFunc {
 	podInfo := fakeKubeletClient{}
 	return func() (bool, error) {
 		for i := range pods.Items {
-			host, id, namespace := pods.Items[i].CurrentState.Host, pods.Items[i].Name, pods.Items[i].Namespace
+			host, id, namespace := pods.Items[i].Status.Host, pods.Items[i].Name, pods.Items[i].Namespace
 			if len(host) == 0 {
 				return false, nil
 			}
@@ -248,16 +248,16 @@ func podExists(c *client.Client, podNamespace string, podID string) wait.Conditi
 func runReplicationControllerTest(c *client.Client) {
 	data, err := ioutil.ReadFile("api/examples/controller.json")
 	if err != nil {
-		glog.Fatalf("Unexpected error: %#v", err)
+		glog.Fatalf("Unexpected error: %v", err)
 	}
 	var controller api.ReplicationController
 	if err := api.Scheme.DecodeInto(data, &controller); err != nil {
-		glog.Fatalf("Unexpected error: %#v", err)
+		glog.Fatalf("Unexpected error: %v", err)
 	}
 
 	glog.Infof("Creating replication controllers")
 	if _, err := c.ReplicationControllers(api.NamespaceDefault).Create(&controller); err != nil {
-		glog.Fatalf("Unexpected error: %#v", err)
+		glog.Fatalf("Unexpected error: %v", err)
 	}
 	glog.Infof("Done creating replication controllers")
 
@@ -499,21 +499,18 @@ func runServiceTest(client *client.Client) {
 				"name": "thisisalonglabel",
 			},
 		},
-		DesiredState: api.PodState{
-			Manifest: api.ContainerManifest{
-				Version: "v1beta1",
-				Containers: []api.Container{
-					{
-						Name:  "c1",
-						Image: "foo",
-						Ports: []api.Port{
-							{ContainerPort: 1234},
-						},
+		Spec: api.PodSpec{
+			Containers: []api.Container{
+				{
+					Name:  "c1",
+					Image: "foo",
+					Ports: []api.Port{
+						{ContainerPort: 1234},
 					},
 				},
 			},
 		},
-		CurrentState: api.PodState{
+		Status: api.PodStatus{
 			PodIP: "1.2.3.4",
 		},
 	}

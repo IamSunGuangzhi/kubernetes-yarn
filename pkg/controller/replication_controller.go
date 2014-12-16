@@ -62,7 +62,7 @@ func (r RealPodControl) createReplica(namespace string, controller api.Replicati
 			Labels: desiredLabels,
 		},
 	}
-	if err := api.Scheme.Convert(&controller.Spec.Template.Spec, &pod.DesiredState.Manifest); err != nil {
+	if err := api.Scheme.Convert(&controller.Spec.Template.Spec, &pod.Spec); err != nil {
 		glog.Errorf("Unable to convert pod template: %v", err)
 		return
 	}
@@ -143,8 +143,8 @@ func (rm *ReplicationManager) watchControllers(resourceVersion *string) {
 func (rm *ReplicationManager) filterActivePods(pods []api.Pod) []api.Pod {
 	var result []api.Pod
 	for _, value := range pods {
-		if api.PodSucceeded != value.CurrentState.Status &&
-			api.PodFailed != value.CurrentState.Status {
+		if api.PodSucceeded != value.Status.Phase &&
+			api.PodFailed != value.Status.Phase {
 			result = append(result, value)
 		}
 	}
@@ -204,7 +204,7 @@ func (rm *ReplicationManager) synchronize() {
 			glog.V(4).Infof("periodic sync of %v", controllers[ix].Name)
 			err := rm.syncHandler(controllers[ix])
 			if err != nil {
-				glog.Errorf("Error synchronizing: %#v", err)
+				glog.Errorf("Error synchronizing: %v", err)
 			}
 		}(ix)
 	}

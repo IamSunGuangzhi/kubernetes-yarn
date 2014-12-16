@@ -1,3 +1,6 @@
+__Note (11/21/2014): This mostly works, but doesn't currently register minions correctly.__
+
+
 # Getting started on Amazon EC2
 
 The example below creates an elastic Kubernetes cluster with 3 worker nodes and a master.

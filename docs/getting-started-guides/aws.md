@@ -7,9 +7,17 @@
 
 ### Cluster turnup
 
-#### Install from source
+#### Download Kubernetes
+##### a) Preferred Option: Install from [0.5 release](https://github.com/GoogleCloudPlatform/kubernetes/releases/tag/v0.5)
+1. ```wget https://github.com/GoogleCloudPlatform/kubernetes/releases/download/v0.5/kubernetes.tar.gz```
+2. ```tar -xzf kubernetes.tar.gz; cd kubernetes```
+3. ```export PATH=$PATH:$PWD/platforms/<os>/<platform>```
+4. __Temporary for v0.5__ : Edit the ```cluster/aws/config-default.sh``` so that ```IMAGE=ami-39501209``` 
+
+##### b) Alternate Option: Install from source at head
 1. ```git clone https://github.com/GoogleCloudPlatform/kubernetes.git```
 2. ```cd kubernetes; make release```
+3. ```export PATH=$PATH:$PWD/_output/local/bin/<os>/<platform>```
 
 #### Turn up the cluster
 ```
@@ -18,6 +26,17 @@ cluster/kube-up.sh
 ```
 
 The script above relies on AWS S3 to deploy the software to instances running in EC2.
+
+Once the cluster is up, it will print the ip address of your cluster.
+
+```
+export KUBERNETES_MASTER=https://<ip-address>
+```
+
+Also setup your path to point to the released binaries:
+```
+
+```
 
 ### Running examples
 
@@ -29,5 +48,5 @@ cd kubernetes
 cluster/kube-down.sh
 ```
 
-### Cloud Formation
+### Cloud Formation [optional]
 There is a contributed [example](aws-coreos.md) from [CoreOS](http://www.coreos.com) using Cloud Formation.

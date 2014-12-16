@@ -148,9 +148,9 @@ func (s *Scheme) NewObject(versionName, typeName string) (interface{}, error) {
 		if t, ok := types[typeName]; ok {
 			return reflect.New(t).Interface(), nil
 		}
-		return nil, fmt.Errorf("No type '%v' for version '%v'", typeName, versionName)
+		return nil, fmt.Errorf("no type '%v' for version '%v'", typeName, versionName)
 	}
-	return nil, fmt.Errorf("No version '%v'", versionName)
+	return nil, fmt.Errorf("no version '%v'", versionName)
 }
 
 // AddConversionFuncs adds functions to the list of conversion functions. The given
@@ -191,6 +191,14 @@ func (s *Scheme) AddConversionFuncs(conversionFuncs ...interface{}) error {
 		}
 	}
 	return nil
+}
+
+// AddStructFieldConversion allows you to specify a mechanical copy for a moved
+// or renamed struct field without writing an entire conversion function. See
+// the comment in Converter.SetStructFieldCopy for parameter details.
+// Call as many times as needed, even on the same fields.
+func (s *Scheme) AddStructFieldConversion(srcFieldType interface{}, srcFieldName string, destFieldType interface{}, destFieldName string) error {
+	return s.converter.SetStructFieldCopy(srcFieldType, srcFieldName, destFieldType, destFieldName)
 }
 
 // Convert will attempt to convert in into out. Both must be pointers. For easy
@@ -276,7 +284,7 @@ func (s *Scheme) ObjectVersionAndKind(obj interface{}) (apiVersion, kind string,
 	version, vOK := s.typeToVersion[t]
 	kinds, kOK := s.typeToKind[t]
 	if !vOK || !kOK {
-		return "", "", fmt.Errorf("Unregistered type: %v", t)
+		return "", "", fmt.Errorf("unregistered type: %v", t)
 	}
 	apiVersion = version
 	kind = kinds[0]

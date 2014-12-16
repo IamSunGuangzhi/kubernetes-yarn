@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -53,6 +54,9 @@ func ReadDockerConfigFile() (cfg DockerConfig, err error) {
 	absDockerConfigFileLocation, err = filepath.Abs(dockerConfigFileLocation)
 	glog.V(2).Infof("looking for .dockercfg at %s", absDockerConfigFileLocation)
 	contents, err := ioutil.ReadFile(absDockerConfigFileLocation)
+	if os.IsNotExist(err) {
+		return make(DockerConfig), nil
+	}
 	if err != nil {
 		glog.Errorf("while trying to read %s: %v", absDockerConfigFileLocation, err)
 		return nil, err
@@ -78,7 +82,7 @@ func ReadUrl(url string, client *http.Client, header *http.Header) (body []byte,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		err := fmt.Errorf("http status code: %d while fetching url: %v", resp.StatusCode)
+		err := fmt.Errorf("http status code: %d while fetching url %s", resp.StatusCode, url)
 		glog.Errorf("while trying to read %s: %v", url, err)
 		glog.V(2).Infof("body of failing http response: %v", resp.Body)
 		return nil, err

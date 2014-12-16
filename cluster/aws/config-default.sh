@@ -23,7 +23,7 @@ NUM_MINIONS=4
 # This is the ubuntu 14.04 image for us-west-2 + ebs
 # See here: http://cloud-images.ubuntu.com/locator/ec2/ for other images
 # This will need to be updated from time to time as amis are deprecated
-IMAGE=ami-55d69e65
+IMAGE=ami-39501209
 INSTANCE_PREFIX=kubernetes
 AWS_SSH_KEY=$HOME/.ssh/kube_aws_rsa
 
@@ -35,3 +35,10 @@ MINION_IP_RANGES=($(eval echo "10.244.{1..${NUM_MINIONS}}.0/24"))
 MINION_SCOPES=""
 POLL_SLEEP_INTERVAL=3
 PORTAL_NET="10.0.0.0/16"
+
+# Optional: Install node monitoring.
+ENABLE_NODE_MONITORING=true
+
+# Optional: Install node logging
+ENABLE_NODE_LOGGING=true
+LOGGING_DESTINATION=elasticsearch # options: elasticsearch, gcp

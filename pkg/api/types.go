@@ -337,24 +337,24 @@ type Lifecycle struct {
 
 // The below types are used by kube_client and api_server.
 
-// PodCondition is a label for the condition of a pod at the current time.
-type PodCondition string
+// PodPhase is a label for the condition of a pod at the current time.
+type PodPhase string
 
 // These are the valid statuses of pods.
 const (
 	// PodPending means the pod has been accepted by the system, but one or more of the containers
 	// has not been started. This includes time before being bound to a node, as well as time spent
 	// pulling images onto the host.
-	PodPending PodCondition = "Pending"
+	PodPending PodPhase = "Pending"
 	// PodRunning means the pod has been bound to a node and all of the containers have been started.
 	// At least one container is still running or is in the process of being restarted.
-	PodRunning PodCondition = "Running"
+	PodRunning PodPhase = "Running"
 	// PodSucceeded means that all containers in the pod have voluntarily terminated
 	// with a container exit code of 0, and the system is not going to restart any of these containers.
-	PodSucceeded PodCondition = "Succeeded"
+	PodSucceeded PodPhase = "Succeeded"
 	// PodFailed means that all containers in the pod have terminated, and at least one container has
 	// terminated in a failure (exited with a non-zero exit code or was stopped by the system).
-	PodFailed PodCondition = "Failed"
+	PodFailed PodPhase = "Failed"
 )
 
 type ContainerStateWaiting struct {
@@ -422,7 +422,7 @@ type RestartPolicy struct {
 // PodState is the state of a pod, used as either input (desired state) or output (current state).
 type PodState struct {
 	Manifest ContainerManifest `json:"manifest,omitempty" yaml:"manifest,omitempty"`
-	Status   PodCondition      `json:"status,omitempty" yaml:"status,omitempty"`
+	Status   PodPhase          `json:"status,omitempty" yaml:"status,omitempty"`
 	// A human readable message indicating details about why the pod is in this state.
 	Message string `json:"message,omitempty" yaml:"message,omitempty"`
 	Host    string `json:"host,omitempty" yaml:"host,omitempty"`
@@ -455,15 +455,37 @@ type PodSpec struct {
 	NodeSelector map[string]string `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty"`
 }
 
+// PodStatus represents information about the status of a pod. Status may trail the actual
+// state of a system.
+type PodStatus struct {
+	Phase PodPhase `json:"phase,omitempty" yaml:"phase,omitempty"`
+
+	// Host is the name of the node that this Pod is currently bound to, or empty if no
+	// assignment has been done.
+	Host   string `json:"host,omitempty" yaml:"host,omitempty"`
+	HostIP string `json:"hostIP,omitempty" yaml:"hostIP,omitempty"`
+	PodIP  string `json:"podIP,omitempty" yaml:"podIP,omitempty"`
+
+	// The key of this map is the *name* of the container within the manifest; it has one
+	// entry per container in the manifest. The value of this map is currently the output
+	// of `docker inspect`. This output format is *not* final and should not be relied
+	// upon.
+	// TODO: Make real decisions about what our info should look like. Re-enable fuzz test
+	// when we have done this.
+	Info PodInfo `json:"info,omitempty" yaml:"info,omitempty"`
+}
+
 // Pod is a collection of containers, used as either input (create, update) or as output (list, get).
 type Pod struct {
 	TypeMeta   `json:",inline" yaml:",inline"`
 	ObjectMeta `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 
-	DesiredState PodState `json:"desiredState,omitempty" yaml:"desiredState,omitempty"`
-	CurrentState PodState `json:"currentState,omitempty" yaml:"currentState,omitempty"`
-	// NodeSelector is a selector which must be true for the pod to fit on a node
-	NodeSelector map[string]string `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty"`
+	// Spec defines the behavior of a pod.
+	Spec PodSpec `json:"spec,omitempty" yaml:"spec,omitempty"`
+
+	// Status represents the current information about a pod. This data may not be up
+	// to date.
+	Status PodStatus `json:"status,omitempty" yaml:"status,omitempty"`
 }
 
 // PodTemplateSpec describes the data a pod should have when created from a template
@@ -615,30 +637,42 @@ type EndpointsList struct {
 	Items []Endpoints `json:"items" yaml:"items"`
 }
 
-// NodeResources represents resources on a Kubernetes system node
+// NodeSpec describes the attributes that a node is created with.
+type NodeSpec struct {
+	// Capacity represents the available resources of a node
+	Capacity ResourceList `json:"capacity,omitempty" yaml:"capacity,omitempty"`
+}
+
+// NodeStatus is information about the current status of a node.
+type NodeStatus struct {
+	// Queried from cloud provider, if available.
+	HostIP string `json:"hostIP,omitempty" yaml:"hostIP,omitempty"`
+}
+
+// NodeResources is an object for conveying resource information about a node.
 // see https://github.com/GoogleCloudPlatform/kubernetes/blob/master/docs/resources.md for more details.
+// TODO: Use ResourceList instead?
 type NodeResources struct {
-	// Capacity represents the available resources.
+	// Capacity represents the available resources of a node
 	Capacity ResourceList `json:"capacity,omitempty" yaml:"capacity,omitempty"`
 }
 
 type ResourceName string
 
-// TODO Replace this with a more complete "Quantity" struct
 type ResourceList map[ResourceName]util.IntOrString
 
-// Minion is a worker node in Kubernetenes.
-// The name of the minion according to etcd is in ID.
+// Minion is a worker node in Kubernetenes
+// The name of the minion according to etcd is in ObjectMeta.Name.
+// TODO: Rename to Node
 type Minion struct {
 	TypeMeta   `json:",inline" yaml:",inline"`
 	ObjectMeta `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 
-	// Queried from cloud provider, if available.
-	HostIP string `json:"hostIP,omitempty" yaml:"hostIP,omitempty"`
-	// Resources available on the node
-	NodeResources NodeResources `json:"resources,omitempty" yaml:"resources,omitempty"`
-	// Labels for the node
-	Labels map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
+	// Spec defines the behavior of a node.
+	Spec NodeSpec `json:"spec,omitempty" yaml:"spec,omitempty"`
+
+	// Status describes the current status of a Node
+	Status NodeStatus `json:"status,omitempty" yaml:"status,omitempty"`
 }
 
 // MinionList is a list of minions.

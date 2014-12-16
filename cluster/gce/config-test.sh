@@ -20,7 +20,7 @@ MASTER_SIZE=g1-small
 MINION_SIZE=g1-small
 NUM_MINIONS=2
 # TODO(dchen1107): Filed an internal issue to create an alias
-# for containervm image, so that gcloud/gcutil will expand this
+# for containervm image, so that gcloud will expand this
 # to the latest supported image.
 IMAGE=container-vm-v20141016
 IMAGE_PROJECT=google-containers
@@ -31,11 +31,20 @@ MASTER_TAG="${INSTANCE_PREFIX}-master"
 MINION_TAG="${INSTANCE_PREFIX}-minion"
 MINION_NAMES=($(eval echo ${INSTANCE_PREFIX}-minion-{1..${NUM_MINIONS}}))
 MINION_IP_RANGES=($(eval echo "10.245.{1..${NUM_MINIONS}}.0/24"))
-MINION_SCOPES=""
+MINION_SCOPES=("storage-ro" "compute-rw")
 # Increase the sleep interval value if concerned about API rate limits. 3, in seconds, is the default.
 POLL_SLEEP_INTERVAL=3
 PORTAL_NET="10.0.0.0/16"
-MONITORING=false
 
 # When set to true, Docker Cache is enabled by default as part of the cluster bring up.
 ENABLE_DOCKER_REGISTRY_CACHE=true
+
+ENABLE_NODE_MONITORING=true
+
+ENABLE_NODE_LOGGING=true
+LOGGING_DESTINATION=elasticsearch # options: elasticsearch, gcp
+
+ENABLE_CLUSTER_MONITORING=false
+
+# Don't require https for registries in our local RFC1918 network
+EXTRA_DOCKER_OPTS="--insecure-registry 10.0.0.0/8"

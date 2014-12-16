@@ -172,8 +172,8 @@ func TestListPods(t *testing.T) {
 			Body: &api.PodList{
 				Items: []api.Pod{
 					{
-						CurrentState: api.PodState{
-							Status: api.PodRunning,
+						Status: api.PodStatus{
+							Phase: api.PodRunning,
 						},
 						ObjectMeta: api.ObjectMeta{
 							Labels: map[string]string{
@@ -205,8 +205,8 @@ func TestListPodsLabels(t *testing.T) {
 			Body: &api.PodList{
 				Items: []api.Pod{
 					{
-						CurrentState: api.PodState{
-							Status: api.PodRunning,
+						Status: api.PodStatus{
+							Phase: api.PodRunning,
 						},
 						ObjectMeta: api.ObjectMeta{
 							Labels: map[string]string{
@@ -233,8 +233,8 @@ func TestGetPod(t *testing.T) {
 		Response: Response{
 			StatusCode: 200,
 			Body: &api.Pod{
-				CurrentState: api.PodState{
-					Status: api.PodRunning,
+				Status: api.PodStatus{
+					Phase: api.PodRunning,
 				},
 				ObjectMeta: api.ObjectMeta{
 					Labels: map[string]string{
@@ -260,8 +260,8 @@ func TestDeletePod(t *testing.T) {
 
 func TestCreatePod(t *testing.T) {
 	requestPod := &api.Pod{
-		CurrentState: api.PodState{
-			Status: api.PodRunning,
+		Status: api.PodStatus{
+			Phase: api.PodRunning,
 		},
 		ObjectMeta: api.ObjectMeta{
 			Labels: map[string]string{
@@ -291,8 +291,8 @@ func TestUpdatePod(t *testing.T) {
 				"name": "baz",
 			},
 		},
-		CurrentState: api.PodState{
-			Status: api.PodRunning,
+		Status: api.PodStatus{
+			Phase: api.PodRunning,
 		},
 	}
 	c := &testClient{
@@ -592,8 +592,10 @@ func TestCreateMinion(t *testing.T) {
 		ObjectMeta: api.ObjectMeta{
 			Name: "minion-1",
 		},
-		HostIP: "123.321.456.654",
-		NodeResources: api.NodeResources{
+		Status: api.NodeStatus{
+			HostIP: "123.321.456.654",
+		},
+		Spec: api.NodeSpec{
 			Capacity: api.ResourceList{
 				resources.CPU:    util.NewIntOrStringFromInt(1000),
 				resources.Memory: util.NewIntOrStringFromInt(1024 * 1024),

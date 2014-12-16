@@ -212,16 +212,14 @@ func TestCreateReplica(t *testing.T) {
 
 	manifest := api.ContainerManifest{}
 	if err := api.Scheme.Convert(&controllerSpec.Spec.Template.Spec, &manifest); err != nil {
-		t.Fatalf("unexpected error", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	expectedPod := api.Pod{
 		ObjectMeta: api.ObjectMeta{
 			Labels: controllerSpec.Spec.Template.Labels,
 		},
-		DesiredState: api.PodState{
-			Manifest: manifest,
-		},
+		Spec: controllerSpec.Spec.Template.Spec,
 	}
 	fakeHandler.ValidateRequest(t, makeURL("/pods?namespace=default"), "POST", nil)
 	actualPod, err := client.Codec.Decode([]byte(fakeHandler.RequestBody))

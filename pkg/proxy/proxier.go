@@ -40,8 +40,7 @@ type serviceInfo struct {
 	timeout    time.Duration
 	mu         sync.Mutex // protects active
 	active     bool
-	// TODO: make this an net.IP address
-	publicIP []string
+	publicIP   []string // TODO: make this a []net.IP
 }
 
 func (si *serviceInfo) isActive() bool {
@@ -82,7 +81,7 @@ func tryConnect(service string, srcAddr net.Addr, protocol string, proxier *Prox
 	for _, retryTimeout := range endpointDialTimeout {
 		endpoint, err := proxier.loadBalancer.NextEndpoint(service, srcAddr)
 		if err != nil {
-			glog.Errorf("Couldn't find an endpoint for %s %v", service, err)
+			glog.Errorf("Couldn't find an endpoint for %s: %v", service, err)
 			return nil, err
 		}
 		glog.V(3).Infof("Mapped service %q to endpoint %s", service, endpoint)
@@ -204,7 +203,7 @@ func (udp *udpProxySocket) ProxyLoop(service string, info *serviceInfo, proxier 
 			}
 			continue
 		}
-		svrConn.SetDeadline(time.Now().Add(info.timeout))
+		err = svrConn.SetDeadline(time.Now().Add(info.timeout))
 		if err != nil {
 			glog.Errorf("SetDeadline failed: %v", err)
 			continue
@@ -224,6 +223,10 @@ func (udp *udpProxySocket) getBackendConn(activeClients *clientCache, cliAddr ne
 		var err error
 		svrConn, err = tryConnect(service, cliAddr, "udp", proxier)
 		if err != nil {
+			return nil, err
+		}
+		if err = svrConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+			glog.Errorf("SetDeadline failed: %v", err)
 			return nil, err
 		}
 		activeClients.clients[cliAddr.String()] = svrConn
@@ -248,7 +251,7 @@ func (udp *udpProxySocket) proxyClient(cliAddr net.Addr, svrConn net.Conn, activ
 			}
 			break
 		}
-		svrConn.SetDeadline(time.Now().Add(timeout))
+		err = svrConn.SetDeadline(time.Now().Add(timeout))
 		if err != nil {
 			glog.Errorf("SetDeadline failed: %v", err)
 			break
@@ -296,7 +299,7 @@ func newProxySocket(protocol api.Protocol, ip net.IP, port int) (proxySocket, er
 		}
 		return &udpProxySocket{conn}, nil
 	}
-	return nil, fmt.Errorf("Unknown protocol %q", protocol)
+	return nil, fmt.Errorf("unknown protocol %q", protocol)
 }
 
 // Proxier is a simple proxy for TCP connections between a localhost:lport
@@ -316,13 +319,13 @@ func NewProxier(loadBalancer LoadBalancer, listenAddress net.IP, iptables iptabl
 	glog.Infof("Initializing iptables")
 	// Set up the iptables foundations we need.
 	if err := iptablesInit(iptables); err != nil {
-		glog.Errorf("Failed to initialize iptables: %s", err)
+		glog.Errorf("Failed to initialize iptables: %v", err)
 		return nil
 	}
 	// Flush old iptables rules (since the bound ports will be invalid after a restart).
 	// When OnUpdate() is first called, the rules will be recreated.
 	if err := iptablesFlush(iptables); err != nil {
-		glog.Errorf("Failed to flush iptables: %s", err)
+		glog.Errorf("Failed to flush iptables: %v", err)
 		return nil
 	}
 	return &Proxier{
@@ -343,7 +346,7 @@ func (proxier *Proxier) SyncLoop() {
 		case <-time.After(syncInterval):
 			glog.V(2).Infof("Periodic sync")
 			if err := iptablesInit(proxier.iptables); err != nil {
-				glog.Errorf("Failed to ensure iptables: %s", err)
+				glog.Errorf("Failed to ensure iptables: %v", err)
 			}
 			proxier.ensurePortals()
 		}
@@ -358,7 +361,7 @@ func (proxier *Proxier) ensurePortals() {
 	for name, info := range proxier.serviceMap {
 		err := proxier.openPortal(name, info)
 		if err != nil {
-			glog.Errorf("Failed to ensure portal for %q: %s", name, err)
+			glog.Errorf("Failed to ensure portal for %q: %v", name, err)
 		}
 	}
 }
@@ -445,31 +448,29 @@ func (proxier *Proxier) OnUpdate(services []api.Service) {
 		if exists && info.isActive() && info.portalPort == service.Spec.Port && info.portalIP.Equal(serviceIP) {
 			continue
 		}
-		if exists && (info.portalPort != service.Spec.Port || !info.portalIP.Equal(serviceIP) || service.Spec.CreateExternalLoadBalancer != (len(info.publicIP) > 0)) {
+		if exists && (info.portalPort != service.Spec.Port || !info.portalIP.Equal(serviceIP) || !ipsEqual(service.Spec.PublicIPs, info.publicIP)) {
 			glog.V(4).Infof("Something changed for service %q: stopping it", service.Name)
 			err := proxier.closePortal(service.Name, info)
 			if err != nil {
-				glog.Errorf("Failed to close portal for %q: %s", service.Name, err)
+				glog.Errorf("Failed to close portal for %q: %v", service.Name, err)
 			}
 			err = proxier.stopProxy(service.Name, info)
 			if err != nil {
-				glog.Errorf("Failed to stop service %q: %s", service.Name, err)
+				glog.Errorf("Failed to stop service %q: %v", service.Name, err)
 			}
 		}
 		glog.V(1).Infof("Adding new service %q at %s:%d/%s (local :%d)", service.Name, serviceIP, service.Spec.Port, service.Spec.Protocol, service.Spec.ProxyPort)
 		info, err := proxier.addServiceOnPort(service.Name, service.Spec.Protocol, service.Spec.ProxyPort, udpIdleTimeout)
 		if err != nil {
-			glog.Errorf("Failed to start proxy for %q: %+v", service.Name, err)
+			glog.Errorf("Failed to start proxy for %q: %v", service.Name, err)
 			continue
 		}
 		info.portalIP = serviceIP
 		info.portalPort = service.Spec.Port
-		if service.Spec.CreateExternalLoadBalancer {
-			info.publicIP = service.Spec.PublicIPs
-		}
+		info.publicIP = service.Spec.PublicIPs
 		err = proxier.openPortal(service.Name, info)
 		if err != nil {
-			glog.Errorf("Failed to open portal for %q: %s", service.Name, err)
+			glog.Errorf("Failed to open portal for %q: %v", service.Name, err)
 		}
 	}
 	proxier.mu.Lock()
@@ -479,14 +480,26 @@ func (proxier *Proxier) OnUpdate(services []api.Service) {
 			glog.V(1).Infof("Stopping service %q", name)
 			err := proxier.closePortal(name, info)
 			if err != nil {
-				glog.Errorf("Failed to close portal for %q: %s", name, err)
+				glog.Errorf("Failed to close portal for %q: %v", name, err)
 			}
 			err = proxier.stopProxyInternal(name, info)
 			if err != nil {
-				glog.Errorf("Failed to stop service %q: %s", name, err)
+				glog.Errorf("Failed to stop service %q: %v", name, err)
 			}
 		}
 	}
+}
+
+func ipsEqual(lhs, rhs []string) bool {
+	if len(lhs) != len(rhs) {
+		return false
+	}
+	for i := range lhs {
+		if lhs[i] != rhs[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (proxier *Proxier) openPortal(service string, info *serviceInfo) error {
@@ -578,11 +591,20 @@ var localhostIPv6 = net.ParseIP("::1")
 
 // Build a slice of iptables args for a portal rule.
 func iptablesPortalArgs(destIP net.IP, destPort int, protocol api.Protocol, proxyIP net.IP, proxyPort int, service string) []string {
+	// This list needs to include all fields as they are eventually spit out
+	// by iptables-save.  This is because some systems do not support the
+	// 'iptables -C' arg, and so fall back on parsing iptables-save output.
+	// If this does not match, it will not pass the check.  For example:
+	// adding the /32 on the destination IP arg is not strictly required,
+	// but causes this list to not match the final iptables-save output.
+	// This is fragile and I hope one day we can stop supporting such old
+	// iptables versions.
 	args := []string{
 		"-m", "comment",
 		"--comment", service,
 		"-p", strings.ToLower(string(protocol)),
-		"-d", destIP.String(),
+		"-m", strings.ToLower(string(protocol)),
+		"-d", fmt.Sprintf("%s/32", destIP.String()),
 		"--dport", fmt.Sprintf("%d", destPort),
 	}
 	// This is tricky.  If the proxy is bound (see Proxier.listenAddress)

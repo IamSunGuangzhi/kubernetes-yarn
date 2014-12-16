@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
-	"strconv"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
@@ -65,7 +63,7 @@ func reloadIPsFromStorage(ipa *ipAllocator, registry Registry) {
 	services, err := registry.ListServices(api.NewContext())
 	if err != nil {
 		// This is really bad.
-		glog.Errorf("can't list services to init service REST: %s", err)
+		glog.Errorf("can't list services to init service REST: %v", err)
 		return
 	}
 	for i := range services.Items {
@@ -76,7 +74,7 @@ func reloadIPsFromStorage(ipa *ipAllocator, registry Registry) {
 		}
 		if err := ipa.Allocate(net.ParseIP(service.Spec.PortalIP)); err != nil {
 			// This is really bad.
-			glog.Errorf("service %q PortalIP %s could not be allocated: %s", service.Name, service.Spec.PortalIP, err)
+			glog.Errorf("service %q PortalIP %s could not be allocated: %v", service.Name, service.Spec.PortalIP, err)
 		}
 	}
 }
@@ -102,8 +100,7 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan apiserver.RE
 	} else {
 		// Try to respect the requested IP.
 		if err := rs.portalMgr.Allocate(net.ParseIP(service.Spec.PortalIP)); err != nil {
-			// TODO: Differentiate "IP already allocated" from real errors.
-			el := errors.ValidationErrorList{errors.NewFieldInvalid("spec.portalIP", service.Spec.PortalIP)}
+			el := errors.ValidationErrorList{errors.NewFieldInvalid("spec.portalIP", service.Spec.PortalIP, err.Error())}
 			return nil, errors.NewInvalid("service", service.Name, el)
 		}
 	}
@@ -119,11 +116,11 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan apiserver.RE
 			}
 			balancer, ok := rs.cloud.TCPLoadBalancer()
 			if !ok {
-				return nil, fmt.Errorf("The cloud provider does not support external TCP load balancers.")
+				return nil, fmt.Errorf("the cloud provider does not support external TCP load balancers.")
 			}
 			zones, ok := rs.cloud.Zones()
 			if !ok {
-				return nil, fmt.Errorf("The cloud provider does not support zone enumeration.")
+				return nil, fmt.Errorf("the cloud provider does not support zone enumeration.")
 			}
 			hosts, err := rs.machines.ListMinions(ctx)
 			if err != nil {
@@ -133,21 +130,21 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan apiserver.RE
 			if err != nil {
 				return nil, err
 			}
-			var ip net.IP
 			if len(service.Spec.PublicIPs) > 0 {
 				for _, publicIP := range service.Spec.PublicIPs {
-					ip, err = balancer.CreateTCPLoadBalancer(service.Name, zone.Region, net.ParseIP(publicIP), service.Spec.Port, hostsFromMinionList(hosts))
+					_, err = balancer.CreateTCPLoadBalancer(service.Name, zone.Region, net.ParseIP(publicIP), service.Spec.Port, hostsFromMinionList(hosts))
 					if err != nil {
-						break
+						// TODO: have to roll-back any successful calls.
+						return nil, err
 					}
 				}
 			} else {
-				ip, err = balancer.CreateTCPLoadBalancer(service.Name, zone.Region, nil, service.Spec.Port, hostsFromMinionList(hosts))
+				ip, err := balancer.CreateTCPLoadBalancer(service.Name, zone.Region, nil, service.Spec.Port, hostsFromMinionList(hosts))
+				if err != nil {
+					return nil, err
+				}
+				service.Spec.PublicIPs = []string{ip.String()}
 			}
-			if err != nil {
-				return nil, err
-			}
-			service.Spec.PublicIPs = []string{ip.String()}
 		}
 		err := rs.registry.CreateService(ctx, service)
 		if err != nil {
@@ -211,27 +208,6 @@ func (*REST) New() runtime.Object {
 	return &api.Service{}
 }
 
-// GetServiceEnvironmentVariables populates a list of environment variables that are use
-// in the container environment to get access to services.
-func GetServiceEnvironmentVariables(ctx api.Context, registry Registry, machine string) ([]api.EnvVar, error) {
-	var result []api.EnvVar
-	services, err := registry.ListServices(ctx)
-	if err != nil {
-		return result, err
-	}
-	for _, service := range services.Items {
-		// Host
-		name := makeEnvVariableName(service.Name) + "_SERVICE_HOST"
-		result = append(result, api.EnvVar{Name: name, Value: service.Spec.PortalIP})
-		// Port
-		name = makeEnvVariableName(service.Name) + "_SERVICE_PORT"
-		result = append(result, api.EnvVar{Name: name, Value: strconv.Itoa(service.Spec.Port)})
-		// Docker-compatible vars.
-		result = append(result, makeLinkVariables(service)...)
-	}
-	return result, nil
-}
-
 func (rs *REST) Update(ctx api.Context, obj runtime.Object) (<-chan apiserver.RESTResult, error) {
 	service := obj.(*api.Service)
 	if !api.ValidNamespace(ctx, &service.ObjectMeta) {
@@ -245,9 +221,8 @@ func (rs *REST) Update(ctx api.Context, obj runtime.Object) (<-chan apiserver.RE
 		if err != nil {
 			return nil, err
 		}
-		if service.Spec.PortalIP != cur.Spec.PortalIP {
-			// TODO: Would be nice to pass "field is immutable" to users.
-			el := errors.ValidationErrorList{errors.NewFieldInvalid("spec.portalIP", service.Spec.PortalIP)}
+		if service.Spec.PortalIP != "" && service.Spec.PortalIP != cur.Spec.PortalIP {
+			el := errors.ValidationErrorList{errors.NewFieldInvalid("spec.portalIP", service.Spec.PortalIP, "field is immutable")}
 			return nil, errors.NewInvalid("service", service.Name, el)
 		}
 		// Copy over non-user fields.
@@ -299,39 +274,4 @@ func (rs *REST) deleteExternalLoadBalancer(service *api.Service) error {
 		return err
 	}
 	return nil
-}
-
-func makeEnvVariableName(str string) string {
-	return strings.ToUpper(strings.Replace(str, "-", "_", -1))
-}
-
-func makeLinkVariables(service api.Service) []api.EnvVar {
-	prefix := makeEnvVariableName(service.Name)
-	protocol := string(api.ProtocolTCP)
-	if service.Spec.Protocol != "" {
-		protocol = string(service.Spec.Protocol)
-	}
-	portPrefix := fmt.Sprintf("%s_PORT_%d_%s", prefix, service.Spec.Port, strings.ToUpper(protocol))
-	return []api.EnvVar{
-		{
-			Name:  prefix + "_PORT",
-			Value: fmt.Sprintf("%s://%s:%d", strings.ToLower(protocol), service.Spec.PortalIP, service.Spec.Port),
-		},
-		{
-			Name:  portPrefix,
-			Value: fmt.Sprintf("%s://%s:%d", strings.ToLower(protocol), service.Spec.PortalIP, service.Spec.Port),
-		},
-		{
-			Name:  portPrefix + "_PROTO",
-			Value: strings.ToLower(protocol),
-		},
-		{
-			Name:  portPrefix + "_PORT",
-			Value: strconv.Itoa(service.Spec.Port),
-		},
-		{
-			Name:  portPrefix + "_ADDR",
-			Value: service.Spec.PortalIP,
-		},
-	}
 }
