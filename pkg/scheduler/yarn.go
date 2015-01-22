@@ -2,17 +2,16 @@ package scheduler
 
 import (
 	"errors"
+	"log"
+	"net"
+	"os"
+	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/hortonworks/gohadoop/hadoop_common/security"
 	"github.com/hortonworks/gohadoop/hadoop_yarn"
 	"github.com/hortonworks/gohadoop/hadoop_yarn/conf"
 	"github.com/hortonworks/gohadoop/hadoop_yarn/yarn_client"
-
-	"log"
-	"net"
-	"os"
-	"time"
 )
 
 const (
@@ -47,13 +46,11 @@ func NewYARNScheduler() Scheduler {
 func YARNInit(handler *yarnSchedulerCallbackHandler) (*yarn_client.YarnClient, *yarn_client.AMRMClientAsync) {
 	var err error
 
-	//Hack! This should be external, but doing this here for demo purposes
-	hadoopHome := "/home/vagrant/hadoop/install/hadoop-2.6.0-SNAPSHOT"
-	os.Setenv("HADOOP_HOME", hadoopHome)
-	os.Setenv("HADOOP_COMMON_HOME", hadoopHome)
-	os.Setenv("HADOOP_CONF_DIR", hadoopHome+"/etc/hadoop")
-	os.Setenv("HADOOP_HDFS_HOME", hadoopHome)
-	os.Setenv("HADOOP_MAPRED_HOME", hadoopHome)
+	hadoopConfDir := os.Getenv("HADOOP_CONF_DIR")
+
+	if hadoopConfDir == "" {
+		log.Fatal("HADOOP_CONF_DIR not set!")
+	}
 
 	// Create YarnConfiguration
 	conf, _ := conf.NewYarnConfiguration()
@@ -236,7 +233,7 @@ func (yarnScheduler *YARNScheduler) Schedule(pod api.Pod, minionLister MinionLis
 				log.Fatal("Failed to create AMNMClient! ", err)
 			}
 			log.Printf("Successfully created nmClient: %v", nmClient)
-      log.Printf("Attempting to start container on %s", host)
+			log.Printf("Attempting to start container on %s", host)
 
 			err = nmClient.StartContainer(container, &containerLaunchContext)
 			if err != nil {

@@ -3,4 +3,5 @@
 	{% set daemon_args = "" %}
 {% endif %}
 {% set master="-master=127.0.0.1:8080" %}
-DAEMON_ARGS="{{daemon_args}} {{master}}"
+{% set hadoop_conf_dir="-hadoop_conf_dir=/home/vagrant/hadoop/install/hadoop-2.6.0-SNAPSHOT/etc/hadoop/" %}
+DAEMON_ARGS="{{daemon_args}} {{master}} {{hadoop_conf_dir}}"

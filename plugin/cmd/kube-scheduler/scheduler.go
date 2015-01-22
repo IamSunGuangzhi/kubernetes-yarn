@@ -20,6 +20,7 @@ import (
 	"flag"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
@@ -34,9 +35,10 @@ import (
 )
 
 var (
-	port         = flag.Int("port", ports.SchedulerPort, "The port that the scheduler's http service runs on")
-	address      = util.IP(net.ParseIP("127.0.0.1"))
-	clientConfig = &client.Config{}
+	port          = flag.Int("port", ports.SchedulerPort, "The port that the scheduler's http service runs on")
+	address       = util.IP(net.ParseIP("127.0.0.1"))
+	hadoopConfDir = flag.String("hadoop_conf_dir", "", "The location of hadoop (YARN) configuration")
+	clientConfig  = &client.Config{}
 )
 
 func init() {
@@ -57,10 +59,15 @@ func main() {
 	}
 
 	record.StartRecording(kubeClient.Events(""), "scheduler")
-
 	go http.ListenAndServe(net.JoinHostPort(address.String(), strconv.Itoa(*port)), nil)
 
 	configFactory := &factory.ConfigFactory{Client: kubeClient}
+
+	if hadoopConfDir == nil || *hadoopConfDir == "" {
+		glog.Fatalf("HADOOP_CONF_DIR not set!")
+	}
+
+	os.Setenv("HADOOP_CONF_DIR", *hadoopConfDir)
 	config := configFactory.Create()
 	s := scheduler.New(config)
 	s.Run()
