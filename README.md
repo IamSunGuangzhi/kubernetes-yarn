@@ -8,7 +8,7 @@ This integration is under development. Please expect bugs and significant change
 
 ## Getting started
 ### Dev Environment
-Kubernetes and Kubernetes-YARN are written in [Go](http://golang.org). Currently, only a [vagrant](http://www.vagrantup.com/)-based setup is supported. That said, bringing up a vagrant-based Kubernetes-YARN environment is fairly easy. 
+Kubernetes and Kubernetes-YARN are written in [Go](http://golang.org). Currently, [vagrant](http://www.vagrantup.com/) and [ansible](http://docs.ansible.com/) based setup mechanims are supported. The instructions below are for creating a vagrant based cluster. For ansible instructions, see [here](https://github.com/hortonworks/kubernetes-yarn/blob/master/cluster/ansible/README.md). 
 
 Please ensure you have [boot2docker](http://boot2docker.io/), Go (at least 1.3), Vagrant (at least 1.6), VirtualBox (at least 4.3.x) and git installed. Run boot2docker to bring up a VM with a running docker daemon (this is used for building release binaries for Kubernetes). 
 
