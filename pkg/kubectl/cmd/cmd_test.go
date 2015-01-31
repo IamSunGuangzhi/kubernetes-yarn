@@ -22,9 +22,14 @@ import (
 	"io"
 	"io/ioutil"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/meta"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl"
 	. "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 
 	"github.com/spf13/cobra"
@@ -66,12 +71,12 @@ func newExternalScheme() (*runtime.Scheme, meta.RESTMapper, runtime.Codec) {
 }
 
 type testPrinter struct {
-	Obj runtime.Object
-	Err error
+	Objects []runtime.Object
+	Err     error
 }
 
 func (t *testPrinter) PrintObj(obj runtime.Object, out io.Writer) error {
-	t.Obj = obj
+	t.Objects = append(t.Objects, obj)
 	fmt.Fprintf(out, "%#v", obj)
 	return t.Err
 }
@@ -88,19 +93,29 @@ func (t *testDescriber) Describe(namespace, name string) (output string, err err
 }
 
 type testFactory struct {
-	Client    kubectl.RESTClient
-	Describer kubectl.Describer
-	Printer   kubectl.ResourcePrinter
-	Err       error
+	Mapper       meta.RESTMapper
+	Typer        runtime.ObjectTyper
+	Client       kubectl.RESTClient
+	Describer    kubectl.Describer
+	Printer      kubectl.ResourcePrinter
+	Validator    validation.Schema
+	Namespace    string
+	ClientConfig *client.Config
+	Err          error
 }
 
 func NewTestFactory() (*Factory, *testFactory, runtime.Codec) {
 	scheme, mapper, codec := newExternalScheme()
-	t := &testFactory{}
+	t := &testFactory{
+		Validator: validation.NullSchema{},
+		Mapper:    mapper,
+		Typer:     scheme,
+	}
 	return &Factory{
-		Mapper: mapper,
-		Typer:  scheme,
-		Client: func(*cobra.Command, *meta.RESTMapping) (kubectl.RESTClient, error) {
+		Object: func(*cobra.Command) (meta.RESTMapper, runtime.ObjectTyper) {
+			return t.Mapper, t.Typer
+		},
+		RESTClient: func(*cobra.Command, *meta.RESTMapping) (resource.RESTClient, error) {
 			return t.Client, t.Err
 		},
 		Describer: func(*cobra.Command, *meta.RESTMapping) (kubectl.Describer, error) {
@@ -109,9 +124,51 @@ func NewTestFactory() (*Factory, *testFactory, runtime.Codec) {
 		Printer: func(cmd *cobra.Command, mapping *meta.RESTMapping, noHeaders bool) (kubectl.ResourcePrinter, error) {
 			return t.Printer, t.Err
 		},
+		Validator: func(cmd *cobra.Command) (validation.Schema, error) {
+			return t.Validator, t.Err
+		},
+		DefaultNamespace: func(cmd *cobra.Command) (string, error) {
+			return t.Namespace, t.Err
+		},
+		ClientConfig: func(cmd *cobra.Command) (*client.Config, error) {
+			return t.ClientConfig, t.Err
+		},
 	}, t, codec
+}
+
+func NewAPIFactory() (*Factory, *testFactory, runtime.Codec) {
+	t := &testFactory{
+		Validator: validation.NullSchema{},
+	}
+	return &Factory{
+		Object: func(*cobra.Command) (meta.RESTMapper, runtime.ObjectTyper) {
+			return latest.RESTMapper, api.Scheme
+		},
+		RESTClient: func(*cobra.Command, *meta.RESTMapping) (resource.RESTClient, error) {
+			return t.Client, t.Err
+		},
+		Describer: func(*cobra.Command, *meta.RESTMapping) (kubectl.Describer, error) {
+			return t.Describer, t.Err
+		},
+		Printer: func(cmd *cobra.Command, mapping *meta.RESTMapping, noHeaders bool) (kubectl.ResourcePrinter, error) {
+			return t.Printer, t.Err
+		},
+		Validator: func(cmd *cobra.Command) (validation.Schema, error) {
+			return t.Validator, t.Err
+		},
+		DefaultNamespace: func(cmd *cobra.Command) (string, error) {
+			return t.Namespace, t.Err
+		},
+		ClientConfig: func(cmd *cobra.Command) (*client.Config, error) {
+			return t.ClientConfig, t.Err
+		},
+	}, t, latest.Codec
 }
 
 func objBody(codec runtime.Codec, obj runtime.Object) io.ReadCloser {
 	return ioutil.NopCloser(bytes.NewReader([]byte(runtime.EncodeOrDie(codec, obj))))
+}
+
+func stringBody(body string) io.ReadCloser {
+	return ioutil.NopCloser(bytes.NewReader([]byte(body)))
 }

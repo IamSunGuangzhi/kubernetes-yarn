@@ -18,38 +18,40 @@ package minion
 
 import (
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/registrytest"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 )
 
-func TestMinionREST(t *testing.T) {
+func TestMinionRegistryREST(t *testing.T) {
 	ms := NewREST(registrytest.NewMinionRegistry([]string{"foo", "bar"}, api.NodeResources{}))
 	ctx := api.NewContext()
-	if obj, err := ms.Get(ctx, "foo"); err != nil || obj.(*api.Minion).Name != "foo" {
+	if obj, err := ms.Get(ctx, "foo"); err != nil || obj.(*api.Node).Name != "foo" {
 		t.Errorf("missing expected object")
 	}
-	if obj, err := ms.Get(ctx, "bar"); err != nil || obj.(*api.Minion).Name != "bar" {
+	if obj, err := ms.Get(ctx, "bar"); err != nil || obj.(*api.Node).Name != "bar" {
 		t.Errorf("missing expected object")
 	}
-	if _, err := ms.Get(ctx, "baz"); err != ErrDoesNotExist {
-		t.Errorf("has unexpected object")
+	if _, err := ms.Get(ctx, "baz"); !errors.IsNotFound(err) {
+		t.Errorf("has unexpected error: %v", err)
 	}
 
-	c, err := ms.Create(ctx, &api.Minion{ObjectMeta: api.ObjectMeta{Name: "baz"}})
+	c, err := ms.Create(ctx, &api.Node{ObjectMeta: api.ObjectMeta{Name: "baz"}})
 	if err != nil {
 		t.Errorf("insert failed")
 	}
 	obj := <-c
-	if !api.HasObjectMetaSystemFieldValues(&obj.Object.(*api.Minion).ObjectMeta) {
+	if !api.HasObjectMetaSystemFieldValues(&obj.Object.(*api.Node).ObjectMeta) {
 		t.Errorf("storage did not populate object meta field values")
 	}
-	if m, ok := obj.Object.(*api.Minion); !ok || m.Name != "baz" {
+	if m, ok := obj.Object.(*api.Node); !ok || m.Name != "baz" {
 		t.Errorf("insert return value was weird: %#v", obj)
 	}
-	if obj, err := ms.Get(ctx, "baz"); err != nil || obj.(*api.Minion).Name != "baz" {
+	if obj, err := ms.Get(ctx, "baz"); err != nil || obj.(*api.Node).Name != "baz" {
 		t.Errorf("insert didn't actually insert")
 	}
 
@@ -61,8 +63,8 @@ func TestMinionREST(t *testing.T) {
 	if s, ok := obj.Object.(*api.Status); !ok || s.Status != api.StatusSuccess {
 		t.Errorf("delete return value was weird: %#v", obj)
 	}
-	if _, err := ms.Get(ctx, "bar"); err != ErrDoesNotExist {
-		t.Errorf("delete didn't actually delete")
+	if _, err := ms.Get(ctx, "bar"); !errors.IsNotFound(err) {
+		t.Errorf("delete didn't actually delete: %v", err)
 	}
 
 	_, err = ms.Delete(ctx, "bar")
@@ -74,43 +76,45 @@ func TestMinionREST(t *testing.T) {
 	if err != nil {
 		t.Errorf("got error calling List")
 	}
-	expect := []api.Minion{
+	expect := []api.Node{
 		{
 			ObjectMeta: api.ObjectMeta{Name: "foo"},
 		}, {
 			ObjectMeta: api.ObjectMeta{Name: "baz"},
 		},
 	}
-	nodeList := list.(*api.MinionList)
+	nodeList := list.(*api.NodeList)
 	if len(expect) != len(nodeList.Items) || !contains(nodeList, "foo") || !contains(nodeList, "baz") {
 		t.Errorf("Unexpected list value: %#v", list)
 	}
 }
 
-func TestMinionStorageWithHealthCheck(t *testing.T) {
+func TestMinionRegistryHealthCheck(t *testing.T) {
 	minionRegistry := registrytest.NewMinionRegistry([]string{}, api.NodeResources{})
-	minionHealthRegistry := HealthyRegistry{
-		delegate: minionRegistry,
-		client:   &notMinion{minion: "m1"},
-	}
+	minionHealthRegistry := NewHealthyRegistry(
+		minionRegistry,
+		&notMinion{minion: "m1"},
+		&util.FakeClock{},
+		60*time.Second,
+	)
 
-	ms := NewREST(&minionHealthRegistry)
+	ms := NewREST(minionHealthRegistry)
 	ctx := api.NewContext()
 
-	c, err := ms.Create(ctx, &api.Minion{ObjectMeta: api.ObjectMeta{Name: "m1"}})
+	c, err := ms.Create(ctx, &api.Node{ObjectMeta: api.ObjectMeta{Name: "m1"}})
 	if err != nil {
 		t.Errorf("insert failed")
 	}
 	result := <-c
-	if m, ok := result.Object.(*api.Minion); !ok || m.Name != "m1" {
+	if m, ok := result.Object.(*api.Node); !ok || m.Name != "m1" {
 		t.Errorf("insert return value was weird: %#v", result)
 	}
-	if _, err := ms.Get(ctx, "m1"); err == nil {
-		t.Errorf("node is unhealthy, expect no result from apiserver")
+	if _, err := ms.Get(ctx, "m1"); err != nil {
+		t.Errorf("node is unhealthy, expect no error: %v", err)
 	}
 }
 
-func contains(nodes *api.MinionList, nodeID string) bool {
+func contains(nodes *api.NodeList, nodeID string) bool {
 	for _, node := range nodes.Items {
 		if node.Name == nodeID {
 			return true
@@ -119,14 +123,14 @@ func contains(nodes *api.MinionList, nodeID string) bool {
 	return false
 }
 
-func TestMinionStorageInvalidUpdate(t *testing.T) {
+func TestMinionRegistryInvalidUpdate(t *testing.T) {
 	storage := NewREST(registrytest.NewMinionRegistry([]string{"foo", "bar"}, api.NodeResources{}))
 	ctx := api.NewContext()
 	obj, err := storage.Get(ctx, "foo")
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
-	minion, ok := obj.(*api.Minion)
+	minion, ok := obj.(*api.Node)
 	if !ok {
 		t.Fatalf("Object is not a minion: %#v", obj)
 	}
@@ -136,14 +140,14 @@ func TestMinionStorageInvalidUpdate(t *testing.T) {
 	}
 }
 
-func TestMinionStorageValidUpdate(t *testing.T) {
+func TestMinionRegistryValidUpdate(t *testing.T) {
 	storage := NewREST(registrytest.NewMinionRegistry([]string{"foo", "bar"}, api.NodeResources{}))
 	ctx := api.NewContext()
 	obj, err := storage.Get(ctx, "foo")
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
-	minion, ok := obj.(*api.Minion)
+	minion, ok := obj.(*api.Node)
 	if !ok {
 		t.Fatalf("Object is not a minion: %#v", obj)
 	}
@@ -156,12 +160,12 @@ func TestMinionStorageValidUpdate(t *testing.T) {
 	}
 }
 
-func TestMinionStorageValidatesCreate(t *testing.T) {
+func TestMinionRegistryValidatesCreate(t *testing.T) {
 	storage := NewREST(registrytest.NewMinionRegistry([]string{"foo", "bar"}, api.NodeResources{}))
 	ctx := api.NewContext()
 	validSelector := map[string]string{"a": "b"}
 	invalidSelector := map[string]string{"NoUppercaseOrSpecialCharsLike=Equals": "b"}
-	failureCases := map[string]api.Minion{
+	failureCases := map[string]api.Node{
 		"zero-length Name": {
 			ObjectMeta: api.ObjectMeta{
 				Name:   "",

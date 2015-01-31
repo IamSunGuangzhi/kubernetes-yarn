@@ -294,6 +294,9 @@ function kube-up {
     echo "readonly ENABLE_NODE_MONITORING='${ENABLE_NODE_MONITORING:-false}'"
     echo "readonly ENABLE_NODE_LOGGING='${ENABLE_NODE_LOGGING:-false}'"
     echo "readonly LOGGING_DESTINATION='${LOGGING_DESTINATION:-}'"
+    echo "readonly ENABLE_CLUSTER_DNS='${ENABLE_CLUSTER_DNS:-false}'"
+    echo "readonly DNS_SERVER_IP='${DNS_SERVER_IP:-}'"
+    echo "readonly DNS_DOMAIN='${DNS_DOMAIN:-}'"
     echo "readonly SERVER_BINARY_TAR='${SERVER_BINARY_TAR##*/}'"
     echo "readonly SALT_TAR='${SALT_TAR##*/}'"
     echo "readonly MASTER_HTPASSWD='${htpasswd}'"
@@ -475,10 +478,18 @@ function test-teardown {
 	echo "TODO"
 }
 
-function setup-monitoring {
+function setup-monitoring-firewall {
     echo "TODO"
 }
 
-function teardown-monitoring {
+function teardown-monitoring-firewall {
   echo "TODO"
+}
+
+function setup-logging-firewall {
+  echo "TODO: setup logging"
+}
+
+function teardown-logging-firewall {
+  echo "TODO: teardown logging"
 }

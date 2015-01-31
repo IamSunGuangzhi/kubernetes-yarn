@@ -17,6 +17,7 @@ limitations under the License.
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -24,8 +25,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/golang/glog"
+	"github.com/imdario/mergo"
 	"github.com/spf13/cobra"
 )
 
@@ -82,6 +87,16 @@ func GetFlagInt(cmd *cobra.Command, flag string) int {
 	return v
 }
 
+func GetFlagDuration(cmd *cobra.Command, flag string) time.Duration {
+	f := cmd.Flags().Lookup(flag)
+	if f == nil {
+		glog.Fatalf("Flag accessed but not defined for command %s: %s", cmd.Name(), flag)
+	}
+	v, err := time.ParseDuration(f.Value.String())
+	checkErr(err)
+	return v
+}
+
 // Returns the first non-empty string out of the ones provided. If all
 // strings are empty, returns an empty string.
 func FirstNonEmptyString(args ...string) string {
@@ -94,6 +109,7 @@ func FirstNonEmptyString(args ...string) string {
 }
 
 // Return a list of file names of a certain type within a given directory.
+// TODO: replace with resource.Builder
 func GetFilesFromDir(directory string, fileType string) []string {
 	files := []string{}
 
@@ -110,6 +126,7 @@ func GetFilesFromDir(directory string, fileType string) []string {
 
 // ReadConfigData reads the bytes from the specified filesytem or network
 // location or from stdin if location == "-".
+// TODO: replace with resource.Builder
 func ReadConfigData(location string) ([]byte, error) {
 	if len(location) == 0 {
 		return nil, fmt.Errorf("location given but empty")
@@ -133,6 +150,7 @@ func ReadConfigData(location string) ([]byte, error) {
 	return ReadConfigDataFromLocation(location)
 }
 
+// TODO: replace with resource.Builder
 func ReadConfigDataFromLocation(location string) ([]byte, error) {
 	// we look for http:// or https:// to determine if valid URL, otherwise do normal file IO
 	if strings.Index(location, "http://") == 0 || strings.Index(location, "https://") == 0 {
@@ -156,4 +174,38 @@ func ReadConfigDataFromLocation(location string) ([]byte, error) {
 		}
 		return data, nil
 	}
+}
+
+func Merge(dst runtime.Object, fragment, kind string) error {
+	// Ok, this is a little hairy, we'd rather not force the user to specify a kind for their JSON
+	// So we pull it into a map, add the Kind field, and then reserialize.
+	// We also pull the apiVersion for proper parsing
+	var intermediate interface{}
+	if err := json.Unmarshal([]byte(fragment), &intermediate); err != nil {
+		return err
+	}
+	dataMap, ok := intermediate.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("Expected a map, found something else: %s", fragment)
+	}
+	version, found := dataMap["apiVersion"]
+	if !found {
+		return fmt.Errorf("Inline JSON requires an apiVersion field")
+	}
+	versionString, ok := version.(string)
+	if !ok {
+		return fmt.Errorf("apiVersion must be a string")
+	}
+	codec := runtime.CodecFor(api.Scheme, versionString)
+
+	dataMap["kind"] = kind
+	data, err := json.Marshal(intermediate)
+	if err != nil {
+		return err
+	}
+	src, err := codec.Decode(data)
+	if err != nil {
+		return err
+	}
+	return mergo.Merge(dst, src)
 }

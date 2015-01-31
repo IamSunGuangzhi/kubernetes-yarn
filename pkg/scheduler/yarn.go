@@ -49,7 +49,7 @@ func YARNInit(handler *yarnSchedulerCallbackHandler) (*yarn_client.YarnClient, *
 	hadoopConfDir := os.Getenv("HADOOP_CONF_DIR")
 
 	if hadoopConfDir == "" {
-		log.Fatal("HADOOP_CONF_DIR not set!")
+		log.Fatal("HADOOP_CONF_DIR not set! Unable to initialize YARNScheduler!")
 	}
 
 	// Create YarnConfiguration

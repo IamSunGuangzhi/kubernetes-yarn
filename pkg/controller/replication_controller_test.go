@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path"
-	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +35,13 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 	"github.com/coreos/go-etcd/etcd"
 )
+
+func makeNamespaceURL(namespace, suffix string) string {
+	if !(testapi.Version() == "v1beta1" || testapi.Version() == "v1beta2") {
+		return makeURL("/ns/" + namespace + suffix)
+	}
+	return makeURL(suffix + "?namespace=" + namespace)
+}
 
 func makeURL(suffix string) string {
 	return path.Join("/api", testapi.Version(), suffix)
@@ -221,12 +227,12 @@ func TestCreateReplica(t *testing.T) {
 		},
 		Spec: controllerSpec.Spec.Template.Spec,
 	}
-	fakeHandler.ValidateRequest(t, makeURL("/pods?namespace=default"), "POST", nil)
+	fakeHandler.ValidateRequest(t, makeNamespaceURL("default", "/pods"), "POST", nil)
 	actualPod, err := client.Codec.Decode([]byte(fakeHandler.RequestBody))
 	if err != nil {
 		t.Errorf("Unexpected error: %#v", err)
 	}
-	if !reflect.DeepEqual(&expectedPod, actualPod) {
+	if !api.Semantic.DeepEqual(&expectedPod, actualPod) {
 		t.Logf("Body: %s", fakeHandler.RequestBody)
 		t.Errorf("Unexpected mismatch.  Expected\n %#v,\n Got:\n %#v", &expectedPod, actualPod)
 	}
@@ -338,7 +344,7 @@ func TestWatchControllers(t *testing.T) {
 	var testControllerSpec api.ReplicationController
 	received := make(chan struct{})
 	manager.syncHandler = func(controllerSpec api.ReplicationController) error {
-		if !reflect.DeepEqual(controllerSpec, testControllerSpec) {
+		if !api.Semantic.DeepEqual(controllerSpec, testControllerSpec) {
 			t.Errorf("Expected %#v, but got %#v", testControllerSpec, controllerSpec)
 		}
 		close(received)

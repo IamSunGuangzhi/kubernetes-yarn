@@ -21,6 +21,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
@@ -66,7 +67,6 @@ func (d *PodDescriber) Describe(namespace, name string) (string, error) {
 			labels.Everything(),
 			labels.Set{
 				"involvedObject.name":      name,
-				"involvedObject.kind":      "Pod",
 				"involvedObject.namespace": namespace,
 			}.AsSelector(),
 		)
@@ -86,7 +86,13 @@ func (d *PodDescriber) Describe(namespace, name string) (string, error) {
 		glog.Errorf("Unable to convert pod manifest: %v", err)
 	}
 
-	events, _ := d.Events(namespace).Search(pod)
+	var events *api.EventList
+	if ref, err := api.GetReference(pod); err != nil {
+		glog.Errorf("Unable to construct reference to '%#v': %v", pod, err)
+	} else {
+		ref.Kind = "" // Find BoundPod objects, too!
+		events, _ = d.Events(namespace).Search(ref)
+	}
 
 	return tabbedString(func(out io.Writer) error {
 		fmt.Fprintf(out, "Name:\t%s\n", pod.Name)
@@ -171,7 +177,7 @@ type MinionDescriber struct {
 }
 
 func (d *MinionDescriber) Describe(namespace, name string) (string, error) {
-	mc := d.Minions()
+	mc := d.Nodes()
 	minion, err := mc.Get(name)
 	if err != nil {
 		return "", err
@@ -188,22 +194,20 @@ func (d *MinionDescriber) Describe(namespace, name string) (string, error) {
 	})
 }
 
-type sortableEvents []api.Event
-
-func (s sortableEvents) Len() int           { return len(s) }
-func (s sortableEvents) Less(i, j int) bool { return s[i].Timestamp.Before(s[j].Timestamp.Time) }
-func (s sortableEvents) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
-
 func describeEvents(el *api.EventList, w io.Writer) {
 	if len(el.Items) == 0 {
 		fmt.Fprint(w, "No events.")
 		return
 	}
-	sort.Sort(sortableEvents(el.Items))
-	fmt.Fprint(w, "Events:\nFrom\tSubobjectPath\tStatus\tReason\tMessage\n")
+	sort.Sort(SortableEvents(el.Items))
+	fmt.Fprint(w, "Events:\nTime\tFrom\tSubobjectPath\tReason\tMessage\n")
 	for _, e := range el.Items {
-		fmt.Fprintf(w, "%v\t%v\t%v\t%v\t%v\n",
-			e.Source, e.InvolvedObject.FieldPath, e.Status, e.Reason, e.Message)
+		fmt.Fprintf(w, "%s\t%v\t%v\t%v\t%v\t%v\n",
+			e.Timestamp.Time.Format(time.RFC1123Z),
+			e.Source,
+			e.InvolvedObject.FieldPath,
+			e.Reason,
+			e.Message)
 	}
 }
 

@@ -18,7 +18,9 @@ package apiserver
 
 import (
 	"bytes"
+	"compress/gzip"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"net/http/httputil"
@@ -28,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/httplog"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
@@ -78,36 +81,39 @@ type ProxyHandler struct {
 }
 
 func (r *ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	// use the default namespace to address the service
-	ctx := api.NewDefaultContext()
-	// if not in default namespace, provide the query parameter
-	// TODO this will need to go in the path in the future and not as a query parameter
-	namespace := req.URL.Query().Get("namespace")
-	if len(namespace) > 0 {
-		ctx = api.WithNamespace(ctx, namespace)
+	namespace, kind, parts, err := KindAndNamespace(req)
+	if err != nil {
+		notFound(w, req)
+		return
 	}
-	parts := strings.SplitN(req.URL.Path, "/", 3)
+	ctx := api.WithNamespace(api.NewContext(), namespace)
 	if len(parts) < 2 {
 		notFound(w, req)
 		return
 	}
-	resourceName := parts[0]
 	id := parts[1]
 	rest := ""
-	if len(parts) == 3 {
-		rest = parts[2]
+	if len(parts) > 2 {
+		proxyParts := parts[2:]
+		rest = strings.Join(proxyParts, "/")
+		if strings.HasSuffix(req.URL.Path, "/") {
+			// The original path had a trailing slash, which has been stripped
+			// by KindAndNamespace(). We should add it back because some
+			// servers (like etcd) require it.
+			rest = rest + "/"
+		}
 	}
-	storage, ok := r.storage[resourceName]
+	storage, ok := r.storage[kind]
 	if !ok {
-		httplog.LogOf(req, w).Addf("'%v' has no storage object", resourceName)
+		httplog.LogOf(req, w).Addf("'%v' has no storage object", kind)
 		notFound(w, req)
 		return
 	}
 
 	redirector, ok := storage.(Redirector)
 	if !ok {
-		httplog.LogOf(req, w).Addf("'%v' is not a redirector", resourceName)
-		notFound(w, req)
+		httplog.LogOf(req, w).Addf("'%v' is not a redirector", kind)
+		errorJSON(errors.NewMethodNotSupported(kind, "proxy"), r.codec, w)
 		return
 	}
 
@@ -150,7 +156,7 @@ func (r *ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	proxy.Transport = &proxyTransport{
 		proxyScheme:      req.URL.Scheme,
 		proxyHost:        req.URL.Host,
-		proxyPathPrepend: path.Join(r.prefix, resourceName, id),
+		proxyPathPrepend: path.Join(r.prefix, "ns", namespace, kind, id),
 	}
 	proxy.FlushInterval = 200 * time.Millisecond
 	proxy.ServeHTTP(w, newReq)
@@ -163,6 +169,11 @@ type proxyTransport struct {
 }
 
 func (t *proxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Add reverse proxy headers.
+	req.Header.Set("X-Forwarded-Uri", t.proxyPathPrepend+req.URL.Path)
+	req.Header.Set("X-Forwarded-Host", t.proxyHost)
+	req.Header.Set("X-Forwarded-Proto", t.proxyScheme)
+
 	resp, err := http.DefaultTransport.RoundTrip(req)
 
 	if err != nil {
@@ -174,7 +185,9 @@ func (t *proxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 
-	if resp.Header.Get("Content-Type") != "text/html" {
+	cType := resp.Header.Get("Content-Type")
+	cType = strings.TrimSpace(strings.SplitN(cType, ";", 2)[0])
+	if cType != "text/html" {
 		// Do nothing, simply pass through
 		return resp, nil
 	}
@@ -228,17 +241,40 @@ func (t *proxyTransport) scan(n *html.Node, f func(*html.Node)) {
 
 // fixLinks modifies links in an HTML file such that they will be redirected through the proxy if needed.
 func (t *proxyTransport) fixLinks(req *http.Request, resp *http.Response) (*http.Response, error) {
-	defer resp.Body.Close()
+	origBody := resp.Body
+	defer origBody.Close()
 
-	doc, err := html.Parse(resp.Body)
+	newContent := &bytes.Buffer{}
+	var reader io.Reader = origBody
+	var writer io.Writer = newContent
+	encoding := resp.Header.Get("Content-Encoding")
+	switch encoding {
+	case "gzip":
+		var err error
+		reader, err = gzip.NewReader(reader)
+		if err != nil {
+			return nil, fmt.Errorf("errorf making gzip reader: %v", err)
+		}
+		gzw := gzip.NewWriter(writer)
+		defer gzw.Close()
+		writer = gzw
+	// TODO: support flate, other encodings.
+	case "":
+		// This is fine
+	default:
+		// Some encoding we don't understand-- don't try to parse this
+		glog.Errorf("Proxy encountered encoding %v for text/html; can't understand this so not fixing links.", encoding)
+		return resp, nil
+	}
+
+	doc, err := html.Parse(reader)
 	if err != nil {
 		glog.Errorf("Parse failed: %v", err)
 		return resp, err
 	}
 
-	newContent := &bytes.Buffer{}
 	t.scan(doc, func(n *html.Node) { t.updateURLs(n, req.URL) })
-	if err := html.Render(newContent, doc); err != nil {
+	if err := html.Render(writer, doc); err != nil {
 		glog.Errorf("Failed to render: %v", err)
 	}
 

@@ -8,26 +8,35 @@ import (
 	"github.com/golang/glog"
 )
 
-//schedulerCache "wraps" a cache store and notifies the scheduler of
+//SchedulerCache "wraps" a cache store and notifies the scheduler of
 //certain caching events. For now, only the "delete" notification needs to be relayed
-type schedulerCache struct {
+type SchedulerCache struct {
 	store     cache.Store
 	scheduler scheduler.Scheduler
 }
 
-func NewSchedulerCache(store cache.Store, scheduler scheduler.Scheduler) cache.Store {
-	return &schedulerCache{store: store, scheduler: scheduler}
+func NewSchedulerCache(store cache.Store, scheduler scheduler.Scheduler) *SchedulerCache {
+	return &SchedulerCache{store: store, scheduler: scheduler}
 }
 
-func (c *schedulerCache) Add(id string, obj interface{}) {
+//Unfortunate Hack - so that scheduler can be set "later"
+func NewSchedulerCacheUnsetScheduler(store cache.Store) *SchedulerCache {
+	return &SchedulerCache{store: store}
+}
+
+func (c *SchedulerCache) SetScheduler(scheduler scheduler.Scheduler) {
+	c.scheduler = scheduler
+}
+
+func (c *SchedulerCache) Add(id string, obj interface{}) {
 	c.store.Add(id, obj)
 }
 
-func (c *schedulerCache) Update(id string, obj interface{}) {
+func (c *SchedulerCache) Update(id string, obj interface{}) {
 	c.store.Update(id, obj)
 }
 
-func (c *schedulerCache) Delete(id string) {
+func (c *SchedulerCache) Delete(id string) {
 	c.store.Delete(id)
 	glog.V(0).Infof("the following pod has been deleted from cache: %s. notifying scheduler", id)
 
@@ -38,18 +47,18 @@ func (c *schedulerCache) Delete(id string) {
 	}
 }
 
-func (c *schedulerCache) List() []interface{} {
+func (c *SchedulerCache) List() []interface{} {
 	return c.store.List()
 }
 
-func (c *schedulerCache) ContainedIDs() util.StringSet {
+func (c *SchedulerCache) ContainedIDs() util.StringSet {
 	return c.store.ContainedIDs()
 }
 
-func (c *schedulerCache) Get(id string) (item interface{}, exists bool) {
+func (c *SchedulerCache) Get(id string) (item interface{}, exists bool) {
 	return c.store.Get(id)
 }
 
-func (c *schedulerCache) Replace(idToObj map[string]interface{}) {
+func (c *SchedulerCache) Replace(idToObj map[string]interface{}) {
 	c.store.Replace(idToObj)
 }

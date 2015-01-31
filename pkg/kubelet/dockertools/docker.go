@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/credentialprovider"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	docker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/glog"
@@ -45,7 +46,9 @@ type DockerInterface interface {
 	StopContainer(id string, timeout uint) error
 	RemoveContainer(opts docker.RemoveContainerOptions) error
 	InspectImage(image string) (*docker.Image, error)
+	ListImages(opts docker.ListImagesOptions) ([]docker.APIImages, error)
 	PullImage(opts docker.PullImageOptions, auth docker.AuthConfiguration) error
+	RemoveImage(image string) error
 	Logs(opts docker.LogsOptions) error
 	Version() (*docker.Env, error)
 	CreateExec(docker.CreateExecOptions) (*docker.Exec, error)
@@ -92,8 +95,8 @@ type dockerContainerCommandRunner struct {
 	client DockerInterface
 }
 
-// The first version of docker that supports exec natively is 1.1.3
-var dockerVersionWithExec = []uint{1, 1, 3}
+// The first version of docker that supports exec natively is 1.3.0 == API 1.15
+var dockerAPIVersionWithExec = []uint{1, 15}
 
 // Returns the major and minor version numbers of docker server.
 func (d *dockerContainerCommandRunner) getDockerServerVersion() ([]uint, error) {
@@ -103,7 +106,7 @@ func (d *dockerContainerCommandRunner) getDockerServerVersion() ([]uint, error) 
 	}
 	version := []uint{}
 	for _, entry := range *env {
-		if strings.Contains(strings.ToLower(entry), "server version") {
+		if strings.Contains(strings.ToLower(entry), "apiversion") || strings.Contains(strings.ToLower(entry), "api version") {
 			elems := strings.Split(strings.Split(entry, "=")[1], ".")
 			for _, elem := range elems {
 				val, err := strconv.ParseUint(elem, 10, 32)
@@ -123,10 +126,10 @@ func (d *dockerContainerCommandRunner) nativeExecSupportExists() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if len(dockerVersionWithExec) != len(version) {
-		return false, fmt.Errorf("unexpected docker version format. Expecting %v format, got %v", dockerVersionWithExec, version)
+	if len(dockerAPIVersionWithExec) != len(version) {
+		return false, fmt.Errorf("unexpected docker version format. Expecting %v format, got %v", dockerAPIVersionWithExec, version)
 	}
-	for idx, val := range dockerVersionWithExec {
+	for idx, val := range dockerAPIVersionWithExec {
 		if version[idx] < val {
 			return false, nil
 		}
@@ -182,7 +185,7 @@ func (d *dockerContainerCommandRunner) RunInContainer(containerID string, cmd []
 	}
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- d.client.StartExec(execObj.Id, startOpts)
+		errChan <- d.client.StartExec(execObj.ID, startOpts)
 	}()
 	wrBuf.Flush()
 	return buf.Bytes(), <-errChan
@@ -222,8 +225,7 @@ func (p throttledDockerPuller) Pull(image string) error {
 	return fmt.Errorf("pull QPS exceeded.")
 }
 
-func (p dockerPuller) IsImagePresent(name string) (bool, error) {
-	image, _ := parseImageName(name)
+func (p dockerPuller) IsImagePresent(image string) (bool, error) {
 	_, err := p.client.InspectImage(image)
 	if err == nil {
 		return true, nil
@@ -253,12 +255,15 @@ func (p throttledDockerPuller) IsImagePresent(name string) (bool, error) {
 // DockerContainers is a map of containers
 type DockerContainers map[DockerID]*docker.APIContainers
 
-func (c DockerContainers) FindPodContainer(podFullName, uuid, containerName string) (*docker.APIContainers, bool, uint64) {
+func (c DockerContainers) FindPodContainer(podFullName string, uid types.UID, containerName string) (*docker.APIContainers, bool, uint64) {
 	for _, dockerContainer := range c {
+		if len(dockerContainer.Names) == 0 {
+			continue
+		}
 		// TODO(proppy): build the docker container name and do a map lookup instead?
 		dockerManifestID, dockerUUID, dockerContainerName, hash := ParseDockerName(dockerContainer.Names[0])
 		if dockerManifestID == podFullName &&
-			(uuid == "" || dockerUUID == uuid) &&
+			(uid == "" || dockerUUID == uid) &&
 			dockerContainerName == containerName {
 			return dockerContainer, true, hash
 		}
@@ -271,6 +276,9 @@ func (c DockerContainers) FindContainersByPodFullName(podFullName string) map[st
 	containers := make(map[string]*docker.APIContainers)
 
 	for _, dockerContainer := range c {
+		if len(dockerContainer.Names) == 0 {
+			continue
+		}
 		dockerManifestID, _, dockerContainerName, _ := ParseDockerName(dockerContainer.Names[0])
 		if dockerManifestID == podFullName {
 			containers[dockerContainerName] = dockerContainer
@@ -289,6 +297,9 @@ func GetKubeletDockerContainers(client DockerInterface, allContainers bool) (Doc
 	}
 	for i := range containers {
 		container := &containers[i]
+		if len(container.Names) == 0 {
+			continue
+		}
 		// Skip containers that we didn't create to allow users to manually
 		// spin up their own containers if they want.
 		// TODO(dchen1107): Remove the old separator "--" by end of Oct
@@ -303,8 +314,8 @@ func GetKubeletDockerContainers(client DockerInterface, allContainers bool) (Doc
 }
 
 // GetRecentDockerContainersWithNameAndUUID returns a list of dead docker containers which matches the name
-// and uuid given.
-func GetRecentDockerContainersWithNameAndUUID(client DockerInterface, podFullName, uuid, containerName string) ([]*docker.Container, error) {
+// and uid given.
+func GetRecentDockerContainersWithNameAndUUID(client DockerInterface, podFullName string, uid types.UID, containerName string) ([]*docker.Container, error) {
 	var result []*docker.Container
 	containers, err := client.ListContainers(docker.ListContainersOptions{All: true})
 	if err != nil {
@@ -318,7 +329,7 @@ func GetRecentDockerContainersWithNameAndUUID(client DockerInterface, podFullNam
 		if dockerPodName != podFullName {
 			continue
 		}
-		if uuid != "" && dockerUUID != uuid {
+		if uid != "" && dockerUUID != uid {
 			continue
 		}
 		if dockerContainerName != containerName {
@@ -381,25 +392,34 @@ func inspectContainer(client DockerInterface, dockerID, containerName, tPath str
 
 	glog.V(3).Infof("Container inspect result: %+v", *inspectResult)
 	containerStatus := api.ContainerStatus{
-		Image: inspectResult.Config.Image,
+		Image:       inspectResult.Config.Image,
+		ContainerID: "docker://" + dockerID,
 	}
 
 	waiting := true
 	if inspectResult.State.Running {
 		containerStatus.State.Running = &api.ContainerStateRunning{
-			StartedAt: inspectResult.State.StartedAt,
+			StartedAt: util.NewTime(inspectResult.State.StartedAt),
 		}
 		if containerName == "net" && inspectResult.NetworkSettings != nil {
 			containerStatus.PodIP = inspectResult.NetworkSettings.IPAddress
 		}
 		waiting = false
 	} else if !inspectResult.State.FinishedAt.IsZero() {
-		// TODO(dchen1107): Integrate with event to provide a better reason
+		reason := ""
+		// Note: An application might handle OOMKilled gracefully.
+		// In that case, the container is oom killed, but the exit
+		// code could be 0.
+		if inspectResult.State.OOMKilled {
+			reason = "OOM Killed"
+		} else {
+			reason = inspectResult.State.Error
+		}
 		containerStatus.State.Termination = &api.ContainerStateTerminated{
 			ExitCode:   inspectResult.State.ExitCode,
-			Reason:     "",
-			StartedAt:  inspectResult.State.StartedAt,
-			FinishedAt: inspectResult.State.FinishedAt,
+			Reason:     reason,
+			StartedAt:  util.NewTime(inspectResult.State.StartedAt),
+			FinishedAt: util.NewTime(inspectResult.State.FinishedAt),
 		}
 		if tPath != "" {
 			path, found := inspectResult.Volumes[tPath]
@@ -428,7 +448,7 @@ func inspectContainer(client DockerInterface, dockerID, containerName, tPath str
 }
 
 // GetDockerPodInfo returns docker info for all containers in the pod/manifest.
-func GetDockerPodInfo(client DockerInterface, manifest api.PodSpec, podFullName, uuid string) (api.PodInfo, error) {
+func GetDockerPodInfo(client DockerInterface, manifest api.PodSpec, podFullName string, uid types.UID) (api.PodInfo, error) {
 	info := api.PodInfo{}
 	expectedContainers := make(map[string]api.Container)
 	for _, container := range manifest.Containers {
@@ -442,11 +462,14 @@ func GetDockerPodInfo(client DockerInterface, manifest api.PodSpec, podFullName,
 	}
 
 	for _, value := range containers {
+		if len(value.Names) == 0 {
+			continue
+		}
 		dockerManifestID, dockerUUID, dockerContainerName, _ := ParseDockerName(value.Names[0])
 		if dockerManifestID != podFullName {
 			continue
 		}
-		if uuid != "" && dockerUUID != uuid {
+		if uid != "" && dockerUUID != uid {
 			continue
 		}
 		c, found := expectedContainers[dockerContainerName]
@@ -518,33 +541,24 @@ const containerNamePrefix = "k8s"
 
 func HashContainer(container *api.Container) uint64 {
 	hash := adler32.New()
-	fmt.Fprintf(hash, "%#v", *container)
+	util.DeepHashObject(hash, *container)
 	return uint64(hash.Sum32())
 }
 
 // Creates a name which can be reversed to identify both full pod name and container name.
-func BuildDockerName(manifestUUID, podFullName string, container *api.Container) string {
+func BuildDockerName(podUID types.UID, podFullName string, container *api.Container) string {
 	containerName := container.Name + "." + strconv.FormatUint(HashContainer(container), 16)
-	// Note, manifest.ID could be blank.
-	if len(manifestUUID) == 0 {
-		return fmt.Sprintf("%s_%s_%s_%08x",
-			containerNamePrefix,
-			containerName,
-			podFullName,
-			rand.Uint32())
-	} else {
-		return fmt.Sprintf("%s_%s_%s_%s_%08x",
-			containerNamePrefix,
-			containerName,
-			podFullName,
-			manifestUUID,
-			rand.Uint32())
-	}
+	return fmt.Sprintf("%s_%s_%s_%s_%08x",
+		containerNamePrefix,
+		containerName,
+		podFullName,
+		podUID,
+		rand.Uint32())
 }
 
 // Unpacks a container name, returning the pod full name and container name we would have used to
 // construct the docker name. If the docker name isn't the one we created, we may return empty strings.
-func ParseDockerName(name string) (podFullName, uuid, containerName string, hash uint64) {
+func ParseDockerName(name string) (podFullName string, podUID types.UID, containerName string, hash uint64) {
 	// For some reason docker appears to be appending '/' to names.
 	// If it's there, strip it.
 	if name[0] == '/' {
@@ -554,23 +568,31 @@ func ParseDockerName(name string) (podFullName, uuid, containerName string, hash
 	if len(parts) == 0 || parts[0] != containerNamePrefix {
 		return
 	}
-	if len(parts) > 1 {
-		pieces := strings.Split(parts[1], ".")
-		containerName = pieces[0]
-		if len(pieces) > 1 {
-			var err error
-			hash, err = strconv.ParseUint(pieces[1], 16, 32)
-			if err != nil {
-				glog.Warningf("invalid container hash: %s", pieces[1])
-			}
+	if len(parts) < 5 {
+		// We have at least 5 fields.  We may have more in the future.
+		// Anything with less fields than this is not something we can
+		// manage.
+		glog.Warningf("found a container with the %q prefix, but too few fields (%d): ", containerNamePrefix, len(parts), name)
+		return
+	}
+
+	// Container name.
+	nameParts := strings.Split(parts[1], ".")
+	containerName = nameParts[0]
+	if len(nameParts) > 1 {
+		var err error
+		hash, err = strconv.ParseUint(nameParts[1], 16, 32)
+		if err != nil {
+			glog.Warningf("invalid container hash: %s", nameParts[1])
 		}
 	}
-	if len(parts) > 2 {
-		podFullName = parts[2]
-	}
-	if len(parts) > 4 {
-		uuid = parts[3]
-	}
+
+	// Pod fullname.
+	podFullName = parts[2]
+
+	// Pod UID.
+	podUID = types.UID(parts[3])
+
 	return
 }
 

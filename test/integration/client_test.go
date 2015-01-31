@@ -19,6 +19,7 @@ limitations under the License.
 package integration
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
@@ -29,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/master"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/version"
+	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/admission/admit"
 )
 
 func init() {
@@ -40,17 +42,23 @@ func TestClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	m := master.New(&master.Config{
+
+	var m *master.Master
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		m.Handler.ServeHTTP(w, req)
+	}))
+	defer s.Close()
+
+	m = master.New(&master.Config{
+		Client:            client.NewOrDie(&client.Config{Host: s.URL}),
 		EtcdHelper:        helper,
 		KubeletClient:     client.FakeKubeletClient{},
 		EnableLogsSupport: false,
 		EnableUISupport:   false,
 		APIPrefix:         "/api",
 		Authorizer:        apiserver.NewAlwaysAllowAuthorizer(),
+		AdmissionControl:  admit.NewAlwaysAdmit(),
 	})
-
-	s := httptest.NewServer(m.Handler)
-	defer s.Close()
 
 	testCases := []string{
 		"v1beta1",

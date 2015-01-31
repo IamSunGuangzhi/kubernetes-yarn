@@ -24,7 +24,7 @@ In a separate tab of your terminal, run:
 
 ```
 cd kubernetes
-sudo hack/local-up-cluster.sh
+hack/local-up-cluster.sh
 ```
 
 This will build and start a lightweight local cluster, consisting of a master
@@ -46,9 +46,9 @@ Your cluster is running, and you want to start running containers!
 You can now use any of the cluster/kubecfg.sh commands to interact with your local setup.
 
 ```
-cluster/kubecfg.sh list /pods
-cluster/kubecfg.sh list /services
-cluster/kubecfg.sh list /replicationControllers
+cluster/kubectl.sh get pods
+cluster/kubectl.sh get services
+cluster/kubectl.sh get replicationControllers
 cluster/kubecfg.sh -p 8081:80 run dockerfile/nginx 1 myNginx
 
 
@@ -61,9 +61,9 @@ cluster/kubecfg.sh -p 8081:80 run dockerfile/nginx 1 myNginx
 ## end wait
 
 ## introspect kubernetes!
-cluster/kubecfg.sh list /pods
-cluster/kubecfg.sh list /services
-cluster/kubecfg.sh list /replicationControllers
+cluster/kubectl.sh get pods
+cluster/kubectl.sh get services
+cluster/kubectl.sh get replicationControllers
 ```
 
 Congratulations!

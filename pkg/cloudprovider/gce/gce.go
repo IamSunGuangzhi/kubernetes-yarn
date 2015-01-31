@@ -28,14 +28,15 @@ import (
 	"strings"
 	"time"
 
-	"code.google.com/p/goauth2/compute/serviceaccount"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/resource"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
+
 	compute "code.google.com/p/google-api-go-client/compute/v1"
 	container "code.google.com/p/google-api-go-client/container/v1beta1"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/resources"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/golang/glog"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 // GCECloud is an implementation of Interface, TCPLoadBalancer and Instances for Google Compute Engine.
@@ -109,10 +110,7 @@ func newGCECloud() (*GCECloud, error) {
 	if err != nil {
 		return nil, err
 	}
-	client, err := serviceaccount.NewClient(&serviceaccount.Options{})
-	if err != nil {
-		return nil, err
-	}
+	client := oauth2.NewClient(oauth2.NoContext, google.ComputeTokenSource(""))
 	svc, err := compute.New(client)
 	if err != nil {
 		return nil, err
@@ -155,14 +153,27 @@ func makeHostLink(projectID, zone, host string) string {
 		projectID, zone, host)
 }
 
-func (gce *GCECloud) makeTargetPool(name, region string, hosts []string) (string, error) {
+// Session Affinity Type string
+type GCEAffinityType string
+
+const (
+	// AffinityTypeNone - no session affinity.
+	GCEAffinityTypeNone GCEAffinityType = "None"
+	// AffinityTypeClientIP is the Client IP based.
+	GCEAffinityTypeClientIP GCEAffinityType = "CLIENT_IP"
+	// AffinityTypeClientIP is the Client IP based.
+	GCEAffinityTypeClientIPProto GCEAffinityType = "CLIENT_IP_PROTO"
+)
+
+func (gce *GCECloud) makeTargetPool(name, region string, hosts []string, affinityType GCEAffinityType) (string, error) {
 	var instances []string
 	for _, host := range hosts {
 		instances = append(instances, makeHostLink(gce.projectID, gce.zone, host))
 	}
 	pool := &compute.TargetPool{
-		Name:      name,
-		Instances: instances,
+		Name:            name,
+		Instances:       instances,
+		SessionAffinity: string(affinityType),
 	}
 	_, err := gce.service.TargetPools.Insert(gce.projectID, region, pool).Do()
 	if err != nil {
@@ -191,9 +202,22 @@ func (gce *GCECloud) TCPLoadBalancerExists(name, region string) (bool, error) {
 	return false, err
 }
 
+//translate from what K8s supports to what the cloud provider supports for session affinity.
+func translateAffinityType(affinityType api.AffinityType) GCEAffinityType {
+	switch affinityType {
+	case api.AffinityTypeClientIP:
+		return GCEAffinityTypeClientIP
+	case api.AffinityTypeNone:
+		return GCEAffinityTypeNone
+	default:
+		glog.Errorf("unexpected affinity type: %v", affinityType)
+		return GCEAffinityTypeNone
+	}
+}
+
 // CreateTCPLoadBalancer is an implementation of TCPLoadBalancer.CreateTCPLoadBalancer.
-func (gce *GCECloud) CreateTCPLoadBalancer(name, region string, externalIP net.IP, port int, hosts []string) (net.IP, error) {
-	pool, err := gce.makeTargetPool(name, region, hosts)
+func (gce *GCECloud) CreateTCPLoadBalancer(name, region string, externalIP net.IP, port int, hosts []string, affinityType api.AffinityType) (net.IP, error) {
+	pool, err := gce.makeTargetPool(name, region, hosts, translateAffinityType(affinityType))
 	if err != nil {
 		return nil, err
 	}
@@ -312,11 +336,12 @@ func (gce *GCECloud) List(filter string) ([]string, error) {
 	return instances, nil
 }
 
-func makeResources(cpu float32, memory float32) *api.NodeResources {
+// cpu is in cores, memory is in GiB
+func makeResources(cpu float64, memory float64) *api.NodeResources {
 	return &api.NodeResources{
 		Capacity: api.ResourceList{
-			resources.CPU:    util.NewIntOrStringFromInt(int(cpu * 1000)),
-			resources.Memory: util.NewIntOrStringFromInt(int(memory * 1024 * 1024 * 1024)),
+			api.ResourceCPU:    *resource.NewMilliQuantity(int64(cpu*1000), resource.DecimalSI),
+			api.ResourceMemory: *resource.NewQuantity(int64(memory*1024*1024*1024), resource.BinarySI),
 		},
 	}
 }
@@ -333,6 +358,7 @@ func (gce *GCECloud) GetNodeResources(name string) (*api.NodeResources, error) {
 	if err != nil {
 		return nil, err
 	}
+	// TODO: actually read machine size instead of this awful hack.
 	switch canonicalizeMachineType(res.MachineType) {
 	case "f1-micro":
 		return makeResources(1, 0.6), nil
@@ -376,6 +402,21 @@ func (gce *GCECloud) AttachDisk(diskName string, readOnly bool) error {
 	}
 	attachedDisk := gce.convertDiskToAttachedDisk(disk, readWrite)
 	_, err = gce.service.Instances.AttachDisk(gce.projectID, gce.zone, gce.instanceID, attachedDisk).Do()
+	if err != nil {
+		// Check if the disk is already attached to this instance.  We do this only
+		// in the error case, since it is expected to be exceptional.
+		instance, err := gce.service.Instances.Get(gce.projectID, gce.zone, gce.instanceID).Do()
+		if err != nil {
+			return err
+		}
+		for _, disk := range instance.Disks {
+			if disk.InitializeParams.DiskName == diskName {
+				// Disk is already attached, we're good to go.
+				return nil
+			}
+		}
+
+	}
 	return err
 }
 

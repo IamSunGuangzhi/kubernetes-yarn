@@ -4,7 +4,7 @@
 set -e
 
 MASTER_IP=$1
-MINION_IPS=$2
+MINION_IPS_STR=$2
 JDK_PKG_VER=java-1.7.0-openjdk-1.7.0.65-2.5.2.5.fc20
 JDK_DEVEL_PKG_VER=java-1.7.0-openjdk-devel-1.7.0.65-2.5.2.5.fc20
 JAVA_HOME=/usr/lib/jvm/${JDK_PKG_VER}.x86_64
@@ -32,8 +32,8 @@ echo "setting up yarn-site.xml .. "
 sed -i "s/__YARN_RESOURCE_MANAGER_IP__/${MASTER_IP}/g" ${YARN_SITE}
 
 echo "setting up slaves file .. "
-echo "slaves list : ${MINION_IPS}"
-echo ${MINION_IPS} | sed "s/,/\n/g" > ${SLAVES}
+echo "list of slaves : ${MINION_IPS_STR}"
+echo ${MINION_IPS_STR} | sed "s/,/\n/g" > ${SLAVES}
 
 echo "copying test map reduce script .. "
 cp ${MR_SCRIPT} ${HADOOP_HOME}

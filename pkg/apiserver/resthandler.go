@@ -21,8 +21,9 @@ import (
 	"path"
 	"time"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/admission"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/httplog"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 
@@ -31,29 +32,29 @@ import (
 
 // RESTHandler implements HTTP verbs on a set of RESTful resources identified by name.
 type RESTHandler struct {
-	storage         map[string]RESTStorage
-	codec           runtime.Codec
-	canonicalPrefix string
-	selfLinker      runtime.SelfLinker
-	ops             *Operations
-	asyncOpWait     time.Duration
+	storage          map[string]RESTStorage
+	codec            runtime.Codec
+	canonicalPrefix  string
+	selfLinker       runtime.SelfLinker
+	ops              *Operations
+	asyncOpWait      time.Duration
+	admissionControl admission.Interface
 }
 
 // ServeHTTP handles requests to all RESTStorage objects.
 func (h *RESTHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	parts := splitPath(req.URL.Path)
-	if len(parts) < 1 {
+	namespace, kind, parts, err := KindAndNamespace(req)
+	if err != nil {
 		notFound(w, req)
 		return
 	}
-	storage := h.storage[parts[0]]
-	if storage == nil {
-		httplog.LogOf(req, w).Addf("'%v' has no storage object", parts[0])
+	storage, ok := h.storage[kind]
+	if !ok {
 		notFound(w, req)
 		return
 	}
 
-	h.handleRESTStorage(parts, req, w, storage)
+	h.handleRESTStorage(parts, req, w, storage, namespace, kind)
 }
 
 // Sets the SelfLink field of the object.
@@ -62,7 +63,22 @@ func (h *RESTHandler) setSelfLink(obj runtime.Object, req *http.Request) error {
 	newURL.Path = path.Join(h.canonicalPrefix, req.URL.Path)
 	newURL.RawQuery = ""
 	newURL.Fragment = ""
-	err := h.selfLinker.SetSelfLink(obj, newURL.String())
+	namespace, err := h.selfLinker.Namespace(obj)
+	if err != nil {
+		return err
+	}
+
+	// we need to add namespace as a query param, if its not in the resource path
+	if len(namespace) > 0 {
+		parts := splitPath(req.URL.Path)
+		if parts[0] != "ns" {
+			query := newURL.Query()
+			query.Set("namespace", namespace)
+			newURL.RawQuery = query.Encode()
+		}
+	}
+
+	err = h.selfLinker.SetSelfLink(obj, newURL.String())
 	if err != nil {
 		return err
 	}
@@ -89,10 +105,23 @@ func (h *RESTHandler) setSelfLinkAddName(obj runtime.Object, req *http.Request) 
 	if err != nil {
 		return err
 	}
+	namespace, err := h.selfLinker.Namespace(obj)
+	if err != nil {
+		return err
+	}
 	newURL := *req.URL
 	newURL.Path = path.Join(h.canonicalPrefix, req.URL.Path, name)
 	newURL.RawQuery = ""
 	newURL.Fragment = ""
+	// we need to add namespace as a query param, if its not in the resource path
+	if len(namespace) > 0 {
+		parts := splitPath(req.URL.Path)
+		if parts[0] != "ns" {
+			query := newURL.Query()
+			query.Set("namespace", namespace)
+			newURL.RawQuery = query.Encode()
+		}
+	}
 	return h.selfLinker.SetSelfLink(obj, newURL.String())
 }
 
@@ -118,18 +147,10 @@ func curry(f func(runtime.Object, *http.Request) error, req *http.Request) func(
 //    sync=[false|true] Synchronous request (only applies to create, update, delete operations)
 //    timeout=<duration> Timeout for synchronous requests, only applies if sync=true
 //    labels=<label-selector> Used for filtering list operations
-func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w http.ResponseWriter, storage RESTStorage) {
-	ctx := api.NewContext()
+func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w http.ResponseWriter, storage RESTStorage, namespace, kind string) {
+	ctx := api.WithNamespace(api.NewContext(), namespace)
 	sync := req.URL.Query().Get("sync") == "true"
 	timeout := parseTimeout(req.URL.Query().Get("timeout"))
-	// TODO for now, we pull namespace from query parameter, but according to spec, it must go in resource path in future PR
-	// if a namespace if specified, it's always used.
-	// for list/watch operations, a namespace is not required if omitted.
-	// for all other operations, if namespace is omitted, we will default to default namespace.
-	namespace := req.URL.Query().Get("namespace")
-	if len(namespace) > 0 {
-		ctx = api.WithNamespace(ctx, namespace)
-	}
 	switch req.Method {
 	case "GET":
 		switch len(parts) {
@@ -144,7 +165,12 @@ func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w htt
 				errorJSON(err, h.codec, w)
 				return
 			}
-			list, err := storage.List(ctx, label, field)
+			lister, ok := storage.(RESTLister)
+			if !ok {
+				errorJSON(errors.NewMethodNotSupported(kind, "list"), h.codec, w)
+				return
+			}
+			list, err := lister.List(ctx, label, field)
 			if err != nil {
 				errorJSON(err, h.codec, w)
 				return
@@ -155,7 +181,12 @@ func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w htt
 			}
 			writeJSON(http.StatusOK, h.codec, list, w)
 		case 2:
-			item, err := storage.Get(api.WithNamespaceDefaultIfNone(ctx), parts[1])
+			getter, ok := storage.(RESTGetter)
+			if !ok {
+				errorJSON(errors.NewMethodNotSupported(kind, "get"), h.codec, w)
+				return
+			}
+			item, err := getter.Get(ctx, parts[1])
 			if err != nil {
 				errorJSON(err, h.codec, w)
 				return
@@ -174,6 +205,12 @@ func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w htt
 			notFound(w, req)
 			return
 		}
+		creater, ok := storage.(RESTCreater)
+		if !ok {
+			errorJSON(errors.NewMethodNotSupported(kind, "create"), h.codec, w)
+			return
+		}
+
 		body, err := readBody(req)
 		if err != nil {
 			errorJSON(err, h.codec, w)
@@ -185,7 +222,15 @@ func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w htt
 			errorJSON(err, h.codec, w)
 			return
 		}
-		out, err := storage.Create(api.WithNamespaceDefaultIfNone(ctx), obj)
+
+		// invoke admission control
+		err = h.admissionControl.Admit(admission.NewAttributesRecord(obj, namespace, parts[0], "CREATE"))
+		if err != nil {
+			errorJSON(err, h.codec, w)
+			return
+		}
+
+		out, err := creater.Create(ctx, obj)
 		if err != nil {
 			errorJSON(err, h.codec, w)
 			return
@@ -198,7 +243,20 @@ func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w htt
 			notFound(w, req)
 			return
 		}
-		out, err := storage.Delete(api.WithNamespaceDefaultIfNone(ctx), parts[1])
+		deleter, ok := storage.(RESTDeleter)
+		if !ok {
+			errorJSON(errors.NewMethodNotSupported(kind, "delete"), h.codec, w)
+			return
+		}
+
+		// invoke admission control
+		err := h.admissionControl.Admit(admission.NewAttributesRecord(nil, namespace, parts[0], "DELETE"))
+		if err != nil {
+			errorJSON(err, h.codec, w)
+			return
+		}
+
+		out, err := deleter.Delete(ctx, parts[1])
 		if err != nil {
 			errorJSON(err, h.codec, w)
 			return
@@ -211,6 +269,12 @@ func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w htt
 			notFound(w, req)
 			return
 		}
+		updater, ok := storage.(RESTUpdater)
+		if !ok {
+			errorJSON(errors.NewMethodNotSupported(kind, "create"), h.codec, w)
+			return
+		}
+
 		body, err := readBody(req)
 		if err != nil {
 			errorJSON(err, h.codec, w)
@@ -222,7 +286,15 @@ func (h *RESTHandler) handleRESTStorage(parts []string, req *http.Request, w htt
 			errorJSON(err, h.codec, w)
 			return
 		}
-		out, err := storage.Update(api.WithNamespaceDefaultIfNone(ctx), obj)
+
+		// invoke admission control
+		err = h.admissionControl.Admit(admission.NewAttributesRecord(obj, namespace, parts[0], "UPDATE"))
+		if err != nil {
+			errorJSON(err, h.codec, w)
+			return
+		}
+
+		out, err := updater.Update(ctx, obj)
 		if err != nil {
 			errorJSON(err, h.codec, w)
 			return

@@ -17,7 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"flag"
 	"net"
 	"net/http"
 	"strconv"
@@ -32,8 +31,10 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/exec"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/iptables"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/version/verflag"
+
 	"github.com/coreos/go-etcd/etcd"
 	"github.com/golang/glog"
+	flag "github.com/spf13/pflag"
 )
 
 var (
@@ -42,6 +43,7 @@ var (
 	bindAddress    = util.IP(net.ParseIP("0.0.0.0"))
 	clientConfig   = &client.Config{}
 	healthz_port   = flag.Int("healthz_port", 10249, "The port to bind the health check server. Use 0 to disable.")
+	oomScoreAdj    = flag.Int("oom_score_adj", -899, "The oom_score_adj value for kube-proxy process. Values must be within the range [-1000, 1000]")
 )
 
 func init() {
@@ -51,14 +53,36 @@ func init() {
 }
 
 func main() {
-	flag.Parse()
+	util.InitFlags()
 	util.InitLogs()
 	defer util.FlushLogs()
+
+	if err := util.ApplyOomScoreAdj(*oomScoreAdj); err != nil {
+		glog.Info(err)
+	}
 
 	verflag.PrintAndExitIfRequested()
 
 	serviceConfig := config.NewServiceConfig()
 	endpointsConfig := config.NewEndpointsConfig()
+
+	protocol := iptables.ProtocolIpv4
+	if net.IP(bindAddress).To4() == nil {
+		protocol = iptables.ProtocolIpv6
+	}
+	loadBalancer := proxy.NewLoadBalancerRR()
+	proxier := proxy.NewProxier(loadBalancer, net.IP(bindAddress), iptables.New(exec.New(), protocol))
+	if proxier == nil {
+		glog.Fatalf("failed to create proxier, aborting")
+	}
+	// Wire proxier to handle changes to services
+	serviceConfig.RegisterHandler(proxier)
+	// And wire loadBalancer to handle changes to endpoints to services
+	endpointsConfig.RegisterHandler(loadBalancer)
+
+	// Note: RegisterHandler() calls need to happen before creation of Sources because sources
+	// only notify on changes, and the initial update (on process start) may be lost if no handlers
+	// are registered yet.
 
 	// define api config source
 	if clientConfig.Host != "" {
@@ -112,17 +136,6 @@ func main() {
 			}
 		}, 5*time.Second)
 	}
-
-	protocol := iptables.ProtocolIpv4
-	if net.IP(bindAddress).To4() == nil {
-		protocol = iptables.ProtocolIpv6
-	}
-	loadBalancer := proxy.NewLoadBalancerRR()
-	proxier := proxy.NewProxier(loadBalancer, net.IP(bindAddress), iptables.New(exec.New(), protocol))
-	// Wire proxier to handle changes to services
-	serviceConfig.RegisterHandler(proxier)
-	// And wire loadBalancer to handle changes to endpoints to services
-	endpointsConfig.RegisterHandler(loadBalancer)
 
 	// Just loop forever for now...
 	proxier.SyncLoop()

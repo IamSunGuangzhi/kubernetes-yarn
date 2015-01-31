@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/version"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/version/verflag"
+
 	"github.com/golang/glog"
 	"github.com/skratchdot/open-golang/open"
 )
@@ -54,6 +55,7 @@ var (
 	json          = flag.Bool("json", false, "If true, print raw JSON for responses")
 	yaml          = flag.Bool("yaml", false, "If true, print raw YAML for responses")
 	verbose       = flag.Bool("verbose", false, "If true, print extra information")
+	validate      = flag.Bool("validate", false, "If true, try to validate the passed in object using a swagger schema on the api server")
 	proxy         = flag.Bool("proxy", false, "If true, run a proxy to the api server")
 	www           = flag.String("www", "", "If -proxy is true, use this directory to serve static files")
 	templateFile  = flag.String("template_file", "", "If present, load this file as a golang template and use it for output printing")
@@ -78,7 +80,8 @@ var parser = kubecfg.NewParser(map[string]runtime.Object{
 	"pods":                   &api.Pod{},
 	"services":               &api.Service{},
 	"replicationControllers": &api.ReplicationController{},
-	"minions":                &api.Minion{},
+	"minions":                &api.Node{},
+	"nodes":                  &api.Node{},
 	"events":                 &api.Event{},
 })
 
@@ -152,12 +155,20 @@ func readConfigData() []byte {
 
 // readConfig reads and parses pod, replicationController, and service
 // configuration files. If any errors log and exit non-zero.
-func readConfig(storage string, serverCodec runtime.Codec) []byte {
+func readConfig(storage string, c *client.Client) []byte {
+	serverCodec := c.RESTClient.Codec
 	if len(*config) == 0 {
 		glog.Fatal("Need config file (-c)")
 	}
 
-	data, err := parser.ToWireFormat(readConfigData(), storage, latest.Codec, serverCodec)
+	dataInput := readConfigData()
+	if *validate {
+		err := kubecfg.ValidateObject(dataInput, c)
+		if err != nil {
+			glog.Fatalf("Error validating %v as an object for %v: %v\n", *config, storage, err)
+		}
+	}
+	data, err := parser.ToWireFormat(dataInput, storage, latest.Codec, serverCodec)
 
 	if err != nil {
 		glog.Fatalf("Error parsing %v as an object for %v: %v\n", *config, storage, err)
@@ -202,7 +213,7 @@ func main() {
 		// TODO: don't specify http or https in Host, and infer that from auth options.
 		clientConfig.Host = "http://localhost:8080"
 	}
-	if client.IsConfigTransportTLS(clientConfig) {
+	if client.IsConfigTransportTLS(*clientConfig) {
 		auth, err := kubecfg.LoadClientAuthInfoOrPrompt(*authConfig, os.Stdin)
 		if err != nil {
 			glog.Fatalf("Error loading auth: %v", err)
@@ -368,7 +379,7 @@ func executeAPIRequest(ctx api.Context, method string, c *client.Client) bool {
 			glog.Fatalf("usage: kubecfg [OPTIONS] %s <%s>", method, prettyWireStorage())
 		}
 	case "update":
-		obj, err := c.Verb("GET").Namespace(api.Namespace(ctx)).Path(path).Do().Get()
+		obj, err := c.Verb("GET").Namespace(api.Namespace(ctx)).Suffix(path).Do().Get()
 		if err != nil {
 			glog.Fatalf("error obtaining resource version for update: %v", err)
 		}
@@ -383,7 +394,7 @@ func executeAPIRequest(ctx api.Context, method string, c *client.Client) bool {
 			glog.Fatalf("usage: kubecfg [OPTIONS] %s <%s>/<id>", method, prettyWireStorage())
 		}
 	case "print":
-		data := readConfig(storage, c.RESTClient.Codec)
+		data := readConfig(storage, c)
 		obj, err := latest.Codec.Decode(data)
 		if err != nil {
 			glog.Fatalf("error setting resource version: %v", err)
@@ -394,7 +405,7 @@ func executeAPIRequest(ctx api.Context, method string, c *client.Client) bool {
 		return false
 	}
 
-	r := c.Verb(verb).Namespace(api.Namespace(ctx)).Path(path)
+	r := c.Verb(verb).Namespace(api.Namespace(ctx)).Suffix(path)
 	if len(*selector) > 0 {
 		r.ParseSelectorParam("labels", *selector)
 	}
@@ -403,7 +414,7 @@ func executeAPIRequest(ctx api.Context, method string, c *client.Client) bool {
 	}
 	if setBody {
 		if len(version) > 0 {
-			data := readConfig(storage, c.RESTClient.Codec)
+			data := readConfig(storage, c)
 			obj, err := latest.Codec.Decode(data)
 			if err != nil {
 				glog.Fatalf("error setting resource version: %v", err)
@@ -419,7 +430,7 @@ func executeAPIRequest(ctx api.Context, method string, c *client.Client) bool {
 			}
 			r.Body(data)
 		} else {
-			r.Body(readConfig(storage, c.RESTClient.Codec))
+			r.Body(readConfig(storage, c))
 		}
 	}
 	result := r.Do()

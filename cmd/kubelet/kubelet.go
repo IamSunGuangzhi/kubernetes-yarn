@@ -21,31 +21,21 @@ limitations under the License.
 package main
 
 import (
-	"flag"
 	"math/rand"
 	"net"
-	"net/http"
-	"os"
-	"os/exec"
-	"path"
-	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/capabilities"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/clientauth"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/health"
+	"github.com/GoogleCloudPlatform/kubernetes/cmd/kubelet/app"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	_ "github.com/GoogleCloudPlatform/kubernetes/pkg/healthz"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet"
-	kconfig "github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/config"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/master/ports"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/standalone"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/version/verflag"
-	"github.com/coreos/go-etcd/etcd"
-	"github.com/fsouza/go-dockerclient"
+
 	"github.com/golang/glog"
-	cadvisor "github.com/google/cadvisor/client"
+	flag "github.com/spf13/pflag"
 )
 
 const defaultRootDir = "/var/lib/kubelet"
@@ -68,218 +58,105 @@ var (
 	allowPrivileged         = flag.Bool("allow_privileged", false, "If true, allow containers to request privileged mode. [default=false]")
 	registryPullQPS         = flag.Float64("registry_qps", 0.0, "If > 0, limit registry pull QPS to this value.  If 0, unlimited. [default=0.0]")
 	registryBurst           = flag.Int("registry_burst", 10, "Maximum size of a bursty pulls, temporarily allows pulls to burst to this number, while still not exceeding registry_qps.  Only used if --registry_qps > 0")
-	runonce                 = flag.Bool("runonce", false, "If true, exit after spawning pods from local manifests or remote urls. Exclusive with --etcd_servers and --enable-server")
+	runonce                 = flag.Bool("runonce", false, "If true, exit after spawning pods from local manifests or remote urls. Exclusive with --etcd_servers, --api_servers, and --enable-server")
 	enableDebuggingHandlers = flag.Bool("enable_debugging_handlers", true, "Enables server endpoints for log collection and local running of containers and commands")
-	minimumGCAge            = flag.Duration("minimum_container_ttl_duration", 0, "Minimum age for a finished container before it is garbage collected.  Examples: '300ms', '10s' or '2h45m'")
+	minimumGCAge            = flag.Duration("minimum_container_ttl_duration", 1*time.Minute, "Minimum age for a finished container before it is garbage collected.  Examples: '300ms', '10s' or '2h45m'")
 	maxContainerCount       = flag.Int("maximum_dead_containers_per_container", 5, "Maximum number of old instances of a container to retain per container.  Each container takes up some disk space.  Default: 5.")
 	authPath                = flag.String("auth_path", "", "Path to .kubernetes_auth file, specifying how to authenticate to API server.")
+	cAdvisorPort            = flag.Uint("cadvisor_port", 4194, "The port of the localhost cAdvisor endpoint")
+	oomScoreAdj             = flag.Int("oom_score_adj", -900, "The oom_score_adj value for kubelet process. Values must be within the range [-1000, 1000]")
 	apiServerList           util.StringList
+	clusterDomain           = flag.String("cluster_domain", "", "Domain for this cluster.  If set, kubelet will configure all containers to search this domain in addition to the host's search domains")
+	masterServiceNamespace  = flag.String("master_service_namespace", api.NamespaceDefault, "The namespace from which the kubernetes master services should be injected into pods")
+	clusterDNS              = util.IP(nil)
+	reallyCrashForTesting   = flag.Bool("really_crash_for_testing", false, "If true, crash with panics more often.")
 )
 
 func init() {
 	flag.Var(&etcdServerList, "etcd_servers", "List of etcd servers to watch (http://ip:port), comma separated. Mutually exclusive with -etcd_config")
 	flag.Var(&address, "address", "The IP address for the info server to serve on (set to 0.0.0.0 for all interfaces)")
-	flag.Var(&apiServerList, "api_servers", "List of Kubernetes API servers to publish events to. (ip:port), comma separated.")
+	flag.Var(&apiServerList, "api_servers", "List of Kubernetes API servers for publishing events, and reading pods and services. (ip:port), comma separated.")
+	flag.Var(&clusterDNS, "cluster_dns", "IP address for a cluster DNS server.  If set, kubelet will configure all containers to use this for DNS resolution in addition to the host's DNS servers")
 }
 
-func getDockerEndpoint() string {
-	var endpoint string
-	if len(*dockerEndpoint) > 0 {
-		endpoint = *dockerEndpoint
-	} else if len(os.Getenv("DOCKER_HOST")) > 0 {
-		endpoint = os.Getenv("DOCKER_HOST")
-	} else {
-		endpoint = "unix:///var/run/docker.sock"
-	}
-	glog.Infof("Connecting to docker on %s", endpoint)
-
-	return endpoint
-}
-
-func getHostname() string {
-	hostname := []byte(*hostnameOverride)
-	if string(hostname) == "" {
-		// Note: We use exec here instead of os.Hostname() because we
-		// want the FQDN, and this is the easiest way to get it.
-		fqdn, err := exec.Command("hostname", "-f").Output()
-		if err != nil {
-			glog.Fatalf("Couldn't determine hostname: %v", err)
-		}
-		hostname = fqdn
-	}
-	return strings.TrimSpace(string(hostname))
-}
-
-func getApiserverClient() (*client.Client, error) {
-	authInfo, err := clientauth.LoadFromFile(*authPath)
-	if err != nil {
-		return nil, err
-	}
-	clientConfig, err := authInfo.MergeWithConfig(client.Config{})
-	if err != nil {
-		return nil, err
-	}
-	// TODO: adapt Kube client to support LB over several servers
-	if len(apiServerList) > 1 {
-		glog.Infof("Mulitple api servers specified.  Picking first one")
-	}
-	clientConfig.Host = apiServerList[0]
-	if c, err := client.New(&clientConfig); err != nil {
-		return nil, err
-	} else {
-		return c, nil
-	}
-}
-
-func main() {
-	flag.Parse()
-	util.InitLogs()
-	defer util.FlushLogs()
-	rand.Seed(time.Now().UTC().UnixNano())
-
-	verflag.PrintAndExitIfRequested()
-
+func setupRunOnce() {
 	if *runonce {
-		exclusiveFlag := "invalid option: --runonce and %s are mutually exclusive"
+		// Don't use remote (etcd or apiserver) sources
 		if len(etcdServerList) > 0 {
-			glog.Fatalf(exclusiveFlag, "--etcd_servers")
+			glog.Fatalf("invalid option: --runonce and --etcd_servers are mutually exclusive")
+		}
+		if len(apiServerList) > 0 {
+			glog.Fatalf("invalid option: --runonce and --api_servers are mutually exclusive")
 		}
 		if *enableServer {
 			glog.Infof("--runonce is set, disabling server")
 			*enableServer = false
 		}
 	}
+}
 
-	etcd.SetLogger(util.NewLogger("etcd "))
+func main() {
+	util.InitFlags()
+	util.InitLogs()
+	util.ReallyCrash = *reallyCrashForTesting
+	defer util.FlushLogs()
+	rand.Seed(time.Now().UTC().UnixNano())
 
-	// Make an API client if possible.
-	if len(apiServerList) < 1 {
-		glog.Info("No api servers specified.")
-	} else {
-		if apiClient, err := getApiserverClient(); err != nil {
-			glog.Errorf("Unable to make apiserver client: %v", err)
-		} else {
-			// Send events to APIserver if there is a client.
-			glog.Infof("Sending events to APIserver.")
-			record.StartRecording(apiClient.Events(""), "kubelet")
-		}
+	verflag.PrintAndExitIfRequested()
+
+	// Cluster creation scripts support both kubernetes versions that 1) support kublet watching
+	// apiserver for pods, and 2) ones that don't. So they ca set both --etcd_servers and
+	// --api_servers.  The current code will ignore the --etcd_servers flag, while older kubelet
+	// code will use the --etd_servers flag for pods, and use --api_servers for event publising.
+	//
+	// TODO(erictune): convert all cloud provider scripts and Google Container Engine to
+	// use only --api_servers, then delete --etcd_servers flag and the resulting dead code.
+	if len(etcdServerList) > 0 && len(apiServerList) > 0 {
+		glog.Infof("Both --etcd_servers and --api_servers are set.  Not using etcd source.")
+		etcdServerList = util.StringList{}
 	}
 
-	// Log the events locally too.
-	record.StartLogging(glog.Infof)
+	setupRunOnce()
 
-	capabilities.Initialize(capabilities.Capabilities{
-		AllowPrivileged: *allowPrivileged,
-	})
-
-	dockerClient, err := docker.NewClient(getDockerEndpoint())
-	if err != nil {
-		glog.Fatal("Couldn't connect to docker.")
+	if err := util.ApplyOomScoreAdj(*oomScoreAdj); err != nil {
+		glog.Info(err)
 	}
 
-	hostname := getHostname()
-
-	if *rootDirectory == "" {
-		glog.Fatal("Invalid root directory path.")
-	}
-	*rootDirectory = path.Clean(*rootDirectory)
-	if err := os.MkdirAll(*rootDirectory, 0750); err != nil {
-		glog.Fatalf("Error creating root directory: %v", err)
+	client, err := standalone.GetAPIServerClient(*authPath, apiServerList)
+	if err != nil && len(apiServerList) > 0 {
+		glog.Warningf("No API client: %v", err)
 	}
 
-	// source of all configuration
-	cfg := kconfig.NewPodConfig(kconfig.PodConfigNotificationSnapshotAndUpdates)
-
-	// define file config source
-	if *config != "" {
-		kconfig.NewSourceFile(*config, *fileCheckFrequency, cfg.Channel("file"))
+	kcfg := standalone.KubeletConfig{
+		Address:                 address,
+		AllowPrivileged:         *allowPrivileged,
+		HostnameOverride:        *hostnameOverride,
+		RootDirectory:           *rootDirectory,
+		ConfigFile:              *config,
+		ManifestURL:             *manifestURL,
+		FileCheckFrequency:      *fileCheckFrequency,
+		HttpCheckFrequency:      *httpCheckFrequency,
+		NetworkContainerImage:   *networkContainerImage,
+		SyncFrequency:           *syncFrequency,
+		RegistryPullQPS:         *registryPullQPS,
+		RegistryBurst:           *registryBurst,
+		MinimumGCAge:            *minimumGCAge,
+		MaxContainerCount:       *maxContainerCount,
+		ClusterDomain:           *clusterDomain,
+		ClusterDNS:              clusterDNS,
+		Runonce:                 *runonce,
+		Port:                    *port,
+		CAdvisorPort:            *cAdvisorPort,
+		EnableServer:            *enableServer,
+		EnableDebuggingHandlers: *enableDebuggingHandlers,
+		DockerClient:            util.ConnectToDockerOrDie(*dockerEndpoint),
+		KubeClient:              client,
+		EtcdClient:              kubelet.EtcdClientOrDie(etcdServerList, *etcdConfigFile),
+		MasterServiceNamespace:  *masterServiceNamespace,
+		VolumePlugins:           app.ProbeVolumePlugins(),
 	}
 
-	// define url config source
-	if *manifestURL != "" {
-		kconfig.NewSourceURL(*manifestURL, *httpCheckFrequency, cfg.Channel("http"))
-	}
-
-	// define etcd config source and initialize etcd client
-	var etcdClient *etcd.Client
-	if len(etcdServerList) > 0 {
-		etcdClient = etcd.NewClient(etcdServerList)
-	} else if *etcdConfigFile != "" {
-		var err error
-		etcdClient, err = etcd.NewClientFromFile(*etcdConfigFile)
-		if err != nil {
-			glog.Fatalf("Error with etcd config file: %v", err)
-		}
-	}
-
-	if etcdClient != nil {
-		glog.Infof("Watching for etcd configs at %v", etcdClient.GetCluster())
-		kconfig.NewSourceEtcd(kconfig.EtcdKeyForHost(hostname), etcdClient, cfg.Channel("etcd"))
-	}
-
-	// TODO: block until all sources have delivered at least one update to the channel, or break the sync loop
-	// up into "per source" synchronizations
-
-	k := kubelet.NewMainKubelet(
-		getHostname(),
-		dockerClient,
-		etcdClient,
-		*rootDirectory,
-		*networkContainerImage,
-		*syncFrequency,
-		float32(*registryPullQPS),
-		*registryBurst,
-		*minimumGCAge,
-		*maxContainerCount)
-
-	k.BirthCry()
-
-	go func() {
-		util.Forever(func() {
-			err := k.GarbageCollectContainers()
-			if err != nil {
-				glog.Errorf("Garbage collect failed: %v", err)
-			}
-		}, time.Minute*1)
-	}()
-
-	go func() {
-		defer util.HandleCrash()
-		// TODO: Monitor this connection, reconnect if needed?
-		glog.V(1).Infof("Trying to create cadvisor client.")
-		cadvisorClient, err := cadvisor.NewClient("http://127.0.0.1:4194")
-		if err != nil {
-			glog.Errorf("Error on creating cadvisor client: %v", err)
-			return
-		}
-		glog.V(1).Infof("Successfully created cadvisor client.")
-		k.SetCadvisorClient(cadvisorClient)
-	}()
-
-	// TODO: These should probably become more plugin-ish: register a factory func
-	// in each checker's init(), iterate those here.
-	health.AddHealthChecker(health.NewExecHealthChecker(k))
-	health.AddHealthChecker(health.NewHTTPHealthChecker(&http.Client{}))
-	health.AddHealthChecker(&health.TCPHealthChecker{})
-
-	// process pods and exit.
-	if *runonce {
-		if _, err := k.RunOnce(cfg.Updates()); err != nil {
-			glog.Fatalf("--runonce failed: %v", err)
-		}
-		return
-	}
-
-	// start the kubelet
-	go util.Forever(func() { k.Run(cfg.Updates()) }, 0)
-
-	// start the kubelet server
-	if *enableServer {
-		go util.Forever(func() {
-			kubelet.ListenAndServeKubeletServer(k, cfg.Channel("http"), net.IP(address), *port, *enableDebuggingHandlers)
-		}, 0)
-	}
-
+	standalone.RunKubelet(&kcfg)
 	// runs forever
 	select {}
 }

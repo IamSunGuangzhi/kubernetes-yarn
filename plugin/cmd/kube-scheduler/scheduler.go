@@ -17,12 +17,12 @@ limitations under the License.
 package main
 
 import (
-	"flag"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
 	_ "github.com/GoogleCloudPlatform/kubernetes/pkg/healthz"
@@ -30,15 +30,19 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/version/verflag"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler"
+	_ "github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/algorithmprovider"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/factory"
 	"github.com/golang/glog"
+
+	flag "github.com/spf13/pflag"
 )
 
 var (
-	port          = flag.Int("port", ports.SchedulerPort, "The port that the scheduler's http service runs on")
-	address       = util.IP(net.ParseIP("127.0.0.1"))
-	hadoopConfDir = flag.String("hadoop_conf_dir", "", "The location of hadoop (YARN) configuration")
-	clientConfig  = &client.Config{}
+	port              = flag.Int("port", ports.SchedulerPort, "The port that the scheduler's http service runs on")
+	address           = util.IP(net.ParseIP("127.0.0.1"))
+	clientConfig      = &client.Config{}
+	hadoopConfDir     = flag.String("hadoop_conf_dir", "", "The location of hadoop (YARN) configuration")
+	algorithmProvider = flag.String("algorithm_provider", factory.DefaultProvider, "The scheduling algorithm provider to use")
 )
 
 func init() {
@@ -47,30 +51,43 @@ func init() {
 }
 
 func main() {
-	flag.Parse()
+	util.InitFlags()
 	util.InitLogs()
 	defer util.FlushLogs()
 
 	verflag.PrintAndExitIfRequested()
+
+	if hadoopConfDir == nil || *hadoopConfDir == "" {
+		glog.Fatalf("HADOOP_CONF_DIR not set!")
+	}
+	os.Setenv("HADOOP_CONF_DIR", *hadoopConfDir)
 
 	kubeClient, err := client.New(clientConfig)
 	if err != nil {
 		glog.Fatalf("Invalid API configuration: %v", err)
 	}
 
-	record.StartRecording(kubeClient.Events(""), "scheduler")
+	record.StartRecording(kubeClient.Events(""), api.EventSource{Component: "scheduler"})
+
 	go http.ListenAndServe(net.JoinHostPort(address.String(), strconv.Itoa(*port)), nil)
 
-	configFactory := &factory.ConfigFactory{Client: kubeClient}
-
-	if hadoopConfDir == nil || *hadoopConfDir == "" {
-		glog.Fatalf("HADOOP_CONF_DIR not set!")
+	configFactory := factory.NewConfigFactory(kubeClient)
+	config, err := createConfig(configFactory)
+	if err != nil {
+		glog.Fatalf("Failed to create scheduler configuration: %v", err)
 	}
 
-	os.Setenv("HADOOP_CONF_DIR", *hadoopConfDir)
-	config := configFactory.Create()
 	s := scheduler.New(config)
 	s.Run()
 
 	select {}
+}
+
+func createConfig(configFactory *factory.ConfigFactory) (*scheduler.Config, error) {
+	// check of algorithm provider is registered and fail fast
+	_, err := factory.GetAlgorithmProvider(*algorithmProvider)
+	if err != nil {
+		return nil, err
+	}
+	return configFactory.CreateFromProvider(*algorithmProvider)
 }

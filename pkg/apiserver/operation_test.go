@@ -113,7 +113,7 @@ func TestOperationsList(t *testing.T) {
 	}
 	handler := Handle(map[string]RESTStorage{
 		"foo": simpleStorage,
-	}, codec, "/prefix", "version", selfLinker)
+	}, codec, "/prefix", "version", selfLinker, admissionControl)
 	handler.(*defaultAPIServer).group.handler.asyncOpWait = 0
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -149,7 +149,7 @@ func TestOperationsList(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	oplist, ok := obj.(*api.ServerOpList)
+	oplist, ok := obj.(*api.OperationList)
 	if !ok {
 		t.Fatalf("expected ServerOpList, got %#v", obj)
 	}
@@ -170,7 +170,7 @@ func TestOpGet(t *testing.T) {
 	}
 	handler := Handle(map[string]RESTStorage{
 		"foo": simpleStorage,
-	}, codec, "/prefix", "version", selfLinker)
+	}, codec, "/prefix", "version", selfLinker, admissionControl)
 	handler.(*defaultAPIServer).group.handler.asyncOpWait = 0
 	server := httptest.NewServer(handler)
 	defer server.Close()

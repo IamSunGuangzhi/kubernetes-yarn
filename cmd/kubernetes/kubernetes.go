@@ -21,10 +21,11 @@ limitations under the License.
 package main
 
 import (
-	"flag"
 	"fmt"
 	"time"
 
+	kubeletapp "github.com/GoogleCloudPlatform/kubernetes/cmd/kubelet/app"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/testapi"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/standalone"
@@ -32,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 
 	"github.com/golang/glog"
+	flag "github.com/spf13/pflag"
 )
 
 var (
@@ -40,17 +42,20 @@ var (
 	dockerEndpoint = flag.String("docker_endpoint", "", "If non-empty, use this for the docker endpoint to communicate with")
 	etcdServer     = flag.String("etcd_server", "http://localhost:4001", "If non-empty, path to the set of etcd server to use")
 	// TODO: Discover these by pinging the host machines, and rip out these flags.
-	nodeMilliCPU = flag.Int64("node_milli_cpu", 1000, "The amount of MilliCPU provisioned on each node")
-	nodeMemory   = flag.Int64("node_memory", 3*1024*1024*1024, "The amount of memory (in bytes) provisioned on each node")
+	nodeMilliCPU           = flag.Int64("node_milli_cpu", 1000, "The amount of MilliCPU provisioned on each node")
+	nodeMemory             = flag.Int64("node_memory", 3*1024*1024*1024, "The amount of memory (in bytes) provisioned on each node")
+	masterServiceNamespace = flag.String("master_service_namespace", api.NamespaceDefault, "The namespace from which the kubernetes master services should be injected into pods")
 )
 
 func startComponents(etcdClient tools.EtcdClient, cl *client.Client, addr string, port int) {
 	machineList := []string{"localhost"}
 
-	standalone.RunApiServer(cl, etcdClient, addr, port)
+	standalone.RunApiServer(cl, etcdClient, addr, port, *masterServiceNamespace)
 	standalone.RunScheduler(cl)
 	standalone.RunControllerManager(machineList, cl, *nodeMilliCPU, *nodeMemory)
-	standalone.RunKubelet(etcdClient, machineList[0], *dockerEndpoint)
+
+	dockerClient := util.ConnectToDockerOrDie(*dockerEndpoint)
+	standalone.SimpleRunKubelet(cl, nil, dockerClient, machineList[0], "/tmp/kubernetes", "", "127.0.0.1", 10250, *masterServiceNamespace, kubeletapp.ProbeVolumePlugins())
 }
 
 func newApiClient(addr string, port int) *client.Client {
@@ -62,7 +67,7 @@ func newApiClient(addr string, port int) *client.Client {
 }
 
 func main() {
-	flag.Parse()
+	util.InitFlags()
 	util.InitLogs()
 	defer util.FlushLogs()
 

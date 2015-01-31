@@ -23,76 +23,109 @@ import (
 	"io"
 	"io/ioutil"
 	"reflect"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"text/template"
+	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
+	"github.com/ghodss/yaml"
 	"github.com/golang/glog"
-	"gopkg.in/v1/yaml"
 )
 
-// GetPrinter takes a format type, an optional format argument, a version and a convertor
-// to be used if the underlying printer requires the object to be in a specific schema (
-// any of the generic formatters), and the default printer to use for this object.
-func GetPrinter(format, formatArgument, version string, convertor runtime.ObjectConvertor, defaultPrinter ResourcePrinter) (ResourcePrinter, error) {
+// GetPrinter takes a format type, an optional format argument. It will return true
+// if the format is generic (untyped), otherwise it will return false. The printer
+// is agnostic to schema versions, so you must send arguments to PrintObj in the
+// version you wish them to be shown using a VersionedPrinter (typically when
+// generic is true).
+func GetPrinter(format, formatArgument string) (ResourcePrinter, bool, error) {
 	var printer ResourcePrinter
 	switch format {
 	case "json":
-		printer = &JSONPrinter{version, convertor}
+		printer = &JSONPrinter{}
 	case "yaml":
-		printer = &YAMLPrinter{version, convertor}
+		printer = &YAMLPrinter{}
 	case "template":
 		if len(formatArgument) == 0 {
-			return nil, fmt.Errorf("template format specified but no template given")
+			return nil, false, fmt.Errorf("template format specified but no template given")
 		}
 		var err error
-		printer, err = NewTemplatePrinter([]byte(formatArgument), version, convertor)
+		printer, err = NewTemplatePrinter([]byte(formatArgument))
 		if err != nil {
-			return nil, fmt.Errorf("error parsing template %s, %v\n", formatArgument, err)
+			return nil, false, fmt.Errorf("error parsing template %s, %v\n", formatArgument, err)
 		}
 	case "templatefile":
 		if len(formatArgument) == 0 {
-			return nil, fmt.Errorf("templatefile format specified but no template file given")
+			return nil, false, fmt.Errorf("templatefile format specified but no template file given")
 		}
 		data, err := ioutil.ReadFile(formatArgument)
 		if err != nil {
-			return nil, fmt.Errorf("error reading template %s, %v\n", formatArgument, err)
+			return nil, false, fmt.Errorf("error reading template %s, %v\n", formatArgument, err)
 		}
-		printer, err = NewTemplatePrinter(data, version, convertor)
+		printer, err = NewTemplatePrinter(data)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing template %s, %v\n", string(data), err)
+			return nil, false, fmt.Errorf("error parsing template %s, %v\n", string(data), err)
 		}
 	case "":
-		printer = defaultPrinter
+		return nil, false, nil
 	default:
-		return nil, fmt.Errorf("output format %q not recognized", format)
+		return nil, false, fmt.Errorf("output format %q not recognized", format)
 	}
-	return printer, nil
+	return printer, true, nil
 }
 
 // ResourcePrinter is an interface that knows how to print runtime objects.
 type ResourcePrinter interface {
-	// Print receives an arbitrary object, formats it and prints it to a writer.
+	// Print receives a runtime object, formats it and prints it to a writer.
 	PrintObj(runtime.Object, io.Writer) error
 }
 
-// JSONPrinter is an implementation of ResourcePrinter which outputs an object as JSON.
-// The input object is assumed to be in the internal version of an API and is converted
-// to the given version first.
-type JSONPrinter struct {
-	version   string
+// ResourcePrinterFunc is a function that can print objects
+type ResourcePrinterFunc func(runtime.Object, io.Writer) error
+
+// PrintObj implements ResourcePrinter
+func (fn ResourcePrinterFunc) PrintObj(obj runtime.Object, w io.Writer) error {
+	return fn(obj, w)
+}
+
+// VersionedPrinter takes runtime objects and ensures they are converted to a given API version
+// prior to being passed to a nested printer.
+type VersionedPrinter struct {
+	printer   ResourcePrinter
 	convertor runtime.ObjectConvertor
+	version   string
+}
+
+// NewVersionedPrinter wraps a printer to convert objects to a known API version prior to printing.
+func NewVersionedPrinter(printer ResourcePrinter, convertor runtime.ObjectConvertor, version string) ResourcePrinter {
+	return &VersionedPrinter{
+		printer:   printer,
+		convertor: convertor,
+		version:   version,
+	}
+}
+
+// PrintObj implements ResourcePrinter
+func (p *VersionedPrinter) PrintObj(obj runtime.Object, w io.Writer) error {
+	if len(p.version) == 0 {
+		return fmt.Errorf("no version specified, object cannot be converted")
+	}
+	converted, err := p.convertor.ConvertToVersion(obj, p.version)
+	if err != nil {
+		return err
+	}
+	return p.printer.PrintObj(converted, w)
+}
+
+// JSONPrinter is an implementation of ResourcePrinter which outputs an object as JSON.
+type JSONPrinter struct {
 }
 
 // PrintObj is an implementation of ResourcePrinter.PrintObj which simply writes the object to the Writer.
 func (p *JSONPrinter) PrintObj(obj runtime.Object, w io.Writer) error {
-	outObj, err := p.convertor.ConvertToVersion(obj, p.version)
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(outObj)
+	data, err := json.Marshal(obj)
 	if err != nil {
 		return err
 	}
@@ -113,11 +146,7 @@ type YAMLPrinter struct {
 
 // PrintObj prints the data as YAML.
 func (p *YAMLPrinter) PrintObj(obj runtime.Object, w io.Writer) error {
-	outObj, err := p.convertor.ConvertToVersion(obj, p.version)
-	if err != nil {
-		return err
-	}
-	output, err := yaml.Marshal(outObj)
+	output, err := yaml.Marshal(obj)
 	if err != nil {
 		return err
 	}
@@ -186,12 +215,12 @@ func (h *HumanReadablePrinter) validatePrintHandlerFunc(printFunc reflect.Value)
 	return nil
 }
 
-var podColumns = []string{"NAME", "IMAGE(S)", "HOST", "LABELS", "STATUS"}
-var replicationControllerColumns = []string{"NAME", "IMAGE(S)", "SELECTOR", "REPLICAS"}
+var podColumns = []string{"POD", "IP", "CONTAINER(S)", "IMAGE(S)", "HOST", "LABELS", "STATUS"}
+var replicationControllerColumns = []string{"CONTROLLER", "CONTAINER(S)", "IMAGE(S)", "SELECTOR", "REPLICAS"}
 var serviceColumns = []string{"NAME", "LABELS", "SELECTOR", "IP", "PORT"}
-var minionColumns = []string{"NAME", "LABELS"}
+var minionColumns = []string{"NAME", "LABELS", "STATUS"}
 var statusColumns = []string{"STATUS"}
-var eventColumns = []string{"NAME", "KIND", "STATUS", "REASON", "MESSAGE"}
+var eventColumns = []string{"TIME", "NAME", "KIND", "SUBOBJECT", "REASON", "SOURCE", "MESSAGE"}
 
 // addDefaultHandlers adds print handlers for default Kubernetes types.
 func (h *HumanReadablePrinter) addDefaultHandlers() {
@@ -233,22 +262,25 @@ func printPod(pod *api.Pod, w io.Writer) error {
 	if err := api.Scheme.Convert(&pod.Spec, spec); err != nil {
 		glog.Errorf("Unable to convert pod manifest: %v", err)
 	}
-	il := listOfImages(spec)
-	// Be paranoid about the case where there is no image.
-	var firstImage string
-	if len(il) > 0 {
-		firstImage, il = il[0], il[1:]
+	containers := spec.Containers
+	var firstContainer api.Container
+	if len(containers) > 0 {
+		firstContainer, containers = containers[0], containers[1:]
 	}
-	_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-		pod.Name, firstImage,
+	_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		pod.Name,
+		pod.Status.PodIP,
+		firstContainer.Name,
+		firstContainer.Image,
 		podHostString(pod.Status.Host, pod.Status.HostIP),
-		formatLabels(pod.Labels), pod.Status.Phase)
+		formatLabels(pod.Labels),
+		pod.Status.Phase)
 	if err != nil {
 		return err
 	}
-	// Lay out all the other images on separate lines.
-	for _, image := range il {
-		_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", "", image, "", "", "")
+	// Lay out all the other containers on separate lines.
+	for _, container := range containers {
+		_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", "", "", container.Name, container.Image, "", "", "")
 		if err != nil {
 			return err
 		}
@@ -266,10 +298,28 @@ func printPodList(podList *api.PodList, w io.Writer) error {
 }
 
 func printReplicationController(controller *api.ReplicationController, w io.Writer) error {
-	_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%d\n",
-		controller.Name, makeImageList(&controller.Spec.Template.Spec),
-		formatLabels(controller.Spec.Selector), controller.Spec.Replicas)
-	return err
+	containers := controller.Spec.Template.Spec.Containers
+	var firstContainer api.Container
+	if len(containers) > 0 {
+		firstContainer, containers = containers[0], containers[1:]
+	}
+	_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\n",
+		controller.Name,
+		firstContainer.Name,
+		firstContainer.Image,
+		formatLabels(controller.Spec.Selector),
+		controller.Spec.Replicas)
+	if err != nil {
+		return err
+	}
+	// Lay out all the other containers on separate lines.
+	for _, container := range containers {
+		_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", "", container.Name, container.Image, "", "")
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func printReplicationControllerList(list *api.ReplicationControllerList, w io.Writer) error {
@@ -296,12 +346,31 @@ func printServiceList(list *api.ServiceList, w io.Writer) error {
 	return nil
 }
 
-func printMinion(minion *api.Minion, w io.Writer) error {
-	_, err := fmt.Fprintf(w, "%s\t%s\n", minion.Name, formatLabels(minion.Labels))
+func printMinion(minion *api.Node, w io.Writer) error {
+	conditionMap := make(map[api.NodeConditionKind]*api.NodeCondition)
+	NodeAllConditions := []api.NodeConditionKind{api.NodeReady, api.NodeReachable}
+	for i := range minion.Status.Conditions {
+		cond := minion.Status.Conditions[i]
+		conditionMap[cond.Kind] = &cond
+	}
+	var status []string
+	for _, validCondition := range NodeAllConditions {
+		if condition, ok := conditionMap[validCondition]; ok {
+			if condition.Status == api.ConditionFull {
+				status = append(status, string(condition.Kind))
+			} else {
+				status = append(status, "Not"+string(condition.Kind))
+			}
+		}
+	}
+	if len(status) == 0 {
+		status = append(status, "Unknown")
+	}
+	_, err := fmt.Fprintf(w, "%s\t%s\t%s\n", minion.Name, formatLabels(minion.Labels), strings.Join(status, ","))
 	return err
 }
 
-func printMinionList(list *api.MinionList, w io.Writer) error {
+func printMinionList(list *api.NodeList, w io.Writer) error {
 	for _, minion := range list.Items {
 		if err := printMinion(&minion, w); err != nil {
 			return err
@@ -317,17 +386,21 @@ func printStatus(status *api.Status, w io.Writer) error {
 
 func printEvent(event *api.Event, w io.Writer) error {
 	_, err := fmt.Fprintf(
-		w, "%s\t%s\t%s\t%s\t%s\n",
+		w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		event.Timestamp.Time.Format(time.RFC1123Z),
 		event.InvolvedObject.Name,
 		event.InvolvedObject.Kind,
-		event.Status,
+		event.InvolvedObject.FieldPath,
 		event.Reason,
+		event.Source,
 		event.Message,
 	)
 	return err
 }
 
+// Sorts and prints the EventList in a human-friendly format.
 func printEventList(list *api.EventList, w io.Writer) error {
+	sort.Sort(SortableEvents(list.Items))
 	for i := range list.Items {
 		if err := printEvent(&list.Items[i], w); err != nil {
 			return err
@@ -350,42 +423,34 @@ func (h *HumanReadablePrinter) PrintObj(obj runtime.Object, output io.Writer) er
 		resultValue := handler.printFunc.Call(args)[0]
 		if resultValue.IsNil() {
 			return nil
-		} else {
-			return resultValue.Interface().(error)
 		}
-	} else {
-		return fmt.Errorf("error: unknown type %#v", obj)
+		return resultValue.Interface().(error)
 	}
+	return fmt.Errorf("error: unknown type %#v", obj)
 }
 
 // TemplatePrinter is an implementation of ResourcePrinter which formats data with a Go Template.
 type TemplatePrinter struct {
 	rawTemplate string
 	template    *template.Template
-	version     string
-	convertor   runtime.ObjectConvertor
 }
 
-func NewTemplatePrinter(tmpl []byte, asVersion string, convertor runtime.ObjectConvertor) (*TemplatePrinter, error) {
-	t, err := template.New("output").Parse(string(tmpl))
+func NewTemplatePrinter(tmpl []byte) (*TemplatePrinter, error) {
+	t, err := template.New("output").
+		Funcs(template.FuncMap{"exists": exists}).
+		Parse(string(tmpl))
 	if err != nil {
 		return nil, err
 	}
 	return &TemplatePrinter{
 		rawTemplate: string(tmpl),
 		template:    t,
-		version:     asVersion,
-		convertor:   convertor,
 	}, nil
 }
 
 // PrintObj formats the obj with the Go Template.
 func (p *TemplatePrinter) PrintObj(obj runtime.Object, w io.Writer) error {
-	outObj, err := p.convertor.ConvertToVersion(obj, p.version)
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(outObj)
+	data, err := json.Marshal(obj)
 	if err != nil {
 		return err
 	}
@@ -393,10 +458,38 @@ func (p *TemplatePrinter) PrintObj(obj runtime.Object, w io.Writer) error {
 	if err := json.Unmarshal(data, &out); err != nil {
 		return err
 	}
-	if err = p.template.Execute(w, out); err != nil {
-		return fmt.Errorf("error executing template '%v': '%v'\n----data----\n%#v\n", p.rawTemplate, err, out)
+	if err = p.safeExecute(w, out); err != nil {
+		// It is way easier to debug this stuff when it shows up in
+		// stdout instead of just stdin. So in addition to returning
+		// a nice error, also print useful stuff with the writer.
+		fmt.Fprintf(w, "Error executing template: %v\n", err)
+		fmt.Fprintf(w, "template was:\n\t%v\n", p.rawTemplate)
+		fmt.Fprintf(w, "raw data was:\n\t%v\n", string(data))
+		fmt.Fprintf(w, "object given to template engine was:\n\t%+v\n", out)
+		return fmt.Errorf("error executing template '%v': '%v'\n----data----\n%+v\n", p.rawTemplate, err, out)
 	}
 	return nil
+}
+
+// safeExecute tries to execute the template, but catches panics and returns an error
+// should the template engine panic.
+func (p *TemplatePrinter) safeExecute(w io.Writer, obj interface{}) error {
+	var panicErr error
+	// Sorry for the double anonymous function. There's probably a clever way
+	// to do this that has the defer'd func setting the value to be returned, but
+	// that would be even less obvious.
+	retErr := func() error {
+		defer func() {
+			if x := recover(); x != nil {
+				panicErr = fmt.Errorf("caught panic: %+v", x)
+			}
+		}()
+		return p.template.Execute(w, obj)
+	}()
+	if panicErr != nil {
+		return panicErr
+	}
+	return retErr
 }
 
 func tabbedString(f func(io.Writer) error) (string, error) {
@@ -412,4 +505,73 @@ func tabbedString(f func(io.Writer) error) (string, error) {
 	out.Flush()
 	str := string(buf.String())
 	return str, nil
+}
+
+// exists returns true if it would be possible to call the index function
+// with these arguments.
+//
+// TODO: how to document this for users?
+//
+// index returns the result of indexing its first argument by the following
+// arguments.  Thus "index x 1 2 3" is, in Go syntax, x[1][2][3]. Each
+// indexed item must be a map, slice, or array.
+func exists(item interface{}, indices ...interface{}) bool {
+	v := reflect.ValueOf(item)
+	for _, i := range indices {
+		index := reflect.ValueOf(i)
+		var isNil bool
+		if v, isNil = indirect(v); isNil {
+			return false
+		}
+		switch v.Kind() {
+		case reflect.Array, reflect.Slice, reflect.String:
+			var x int64
+			switch index.Kind() {
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				x = index.Int()
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+				x = int64(index.Uint())
+			default:
+				return false
+			}
+			if x < 0 || x >= int64(v.Len()) {
+				return false
+			}
+			v = v.Index(int(x))
+		case reflect.Map:
+			if !index.IsValid() {
+				index = reflect.Zero(v.Type().Key())
+			}
+			if !index.Type().AssignableTo(v.Type().Key()) {
+				return false
+			}
+			if x := v.MapIndex(index); x.IsValid() {
+				v = x
+			} else {
+				v = reflect.Zero(v.Type().Elem())
+			}
+		default:
+			return false
+		}
+	}
+	if _, isNil := indirect(v); isNil {
+		return false
+	}
+	return true
+}
+
+// stolen from text/template
+// indirect returns the item at the end of indirection, and a bool to indicate if it's nil.
+// We indirect through pointers and empty interfaces (only) because
+// non-empty interfaces have methods we might need.
+func indirect(v reflect.Value) (rv reflect.Value, isNil bool) {
+	for ; v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface; v = v.Elem() {
+		if v.IsNil() {
+			return v, true
+		}
+		if v.Kind() == reflect.Interface && v.NumMethod() > 0 {
+			break
+		}
+	}
+	return v, false
 }

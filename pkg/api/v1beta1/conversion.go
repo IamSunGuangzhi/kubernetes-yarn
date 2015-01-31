@@ -17,11 +17,13 @@ limitations under the License.
 package v1beta1
 
 import (
-	"errors"
+	"fmt"
 	"strconv"
 
 	newer "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/conversion"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 )
 
 func init() {
@@ -34,7 +36,11 @@ func init() {
 	newer.Scheme.AddStructFieldConversion(newer.ObjectMeta{}, "ObjectMeta", TypeMeta{}, "TypeMeta")
 	newer.Scheme.AddStructFieldConversion(newer.ListMeta{}, "ListMeta", TypeMeta{}, "TypeMeta")
 
-	newer.Scheme.AddConversionFuncs(
+	// TODO: scope this to a specific type once that becomes available and remove the Event conversion functions below
+	// newer.Scheme.AddStructFieldConversion(string(""), "Status", string(""), "Condition")
+	// newer.Scheme.AddStructFieldConversion(string(""), "Condition", string(""), "Status")
+
+	err := newer.Scheme.AddConversionFuncs(
 		// TypeMeta must be split into two objects
 		func(in *newer.TypeMeta, out *TypeMeta, s conversion.Scope) error {
 			out.Kind = in.Kind
@@ -137,7 +143,7 @@ func init() {
 		},
 
 		// MinionList.Items had a wrong name in v1beta1
-		func(in *newer.MinionList, out *MinionList, s conversion.Scope) error {
+		func(in *newer.NodeList, out *MinionList, s conversion.Scope) error {
 			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
 				return err
 			}
@@ -150,7 +156,7 @@ func init() {
 			out.Minions = out.Items
 			return nil
 		},
-		func(in *MinionList, out *newer.MinionList, s conversion.Scope) error {
+		func(in *MinionList, out *newer.NodeList, s conversion.Scope) error {
 			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
 				return err
 			}
@@ -176,6 +182,7 @@ func init() {
 			if err := s.Convert(&in.Info, &out.Info, 0); err != nil {
 				return err
 			}
+			out.Message = in.Message
 			out.Host = in.Host
 			out.HostIP = in.HostIP
 			out.PodIP = in.PodIP
@@ -189,9 +196,24 @@ func init() {
 				return err
 			}
 
+			out.Message = in.Message
 			out.Host = in.Host
 			out.HostIP = in.HostIP
 			out.PodIP = in.PodIP
+			return nil
+		},
+		func(in *newer.PodSpec, out *PodState, s conversion.Scope) error {
+			if err := s.Convert(&in, &out.Manifest, 0); err != nil {
+				return err
+			}
+			out.Host = in.Host
+			return nil
+		},
+		func(in *PodState, out *newer.PodSpec, s conversion.Scope) error {
+			if err := s.Convert(&in.Manifest, &out, 0); err != nil {
+				return err
+			}
+			out.Host = in.Host
 			return nil
 		},
 
@@ -205,11 +227,17 @@ func init() {
 			case newer.PodRunning:
 				*out = PodRunning
 			case newer.PodSucceeded:
-				*out = PodTerminated
+				*out = PodSucceeded
 			case newer.PodFailed:
 				*out = PodTerminated
+			case newer.PodUnknown:
+				*out = PodUnknown
 			default:
-				return errors.New("The string provided is not a valid PodPhase constant value")
+				return &newer.ConversionError{
+					In:      in,
+					Out:     out,
+					Message: "The string provided is not a valid PodPhase constant value",
+				}
 			}
 
 			return nil
@@ -226,8 +254,16 @@ func init() {
 			case PodTerminated:
 				// Older API versions did not contain enough info to map to PodSucceeded
 				*out = newer.PodFailed
+			case PodSucceeded:
+				*out = newer.PodSucceeded
+			case PodUnknown:
+				*out = newer.PodUnknown
 			default:
-				return errors.New("The string provided is not a valid PodPhase constant value")
+				return &newer.ConversionError{
+					In:      in,
+					Out:     out,
+					Message: "The string provided is not a valid PodPhase constant value",
+				}
 			}
 			return nil
 		},
@@ -247,6 +283,7 @@ func init() {
 			if err := s.Convert(&in.Spec, &out.DesiredState.Manifest, 0); err != nil {
 				return err
 			}
+			out.DesiredState.Host = in.Spec.Host
 			if err := s.Convert(&in.Status, &out.CurrentState, 0); err != nil {
 				return err
 			}
@@ -268,10 +305,35 @@ func init() {
 			if err := s.Convert(&in.DesiredState.Manifest, &out.Spec, 0); err != nil {
 				return err
 			}
+			out.Spec.Host = in.DesiredState.Host
 			if err := s.Convert(&in.CurrentState, &out.Status, 0); err != nil {
 				return err
 			}
 			if err := s.Convert(&in.NodeSelector, &out.Spec.NodeSelector, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *newer.PodStatusResult, out *PodStatusResult, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Status, &out.State, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *PodStatusResult, out *newer.PodStatusResult, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.State, &out.Status, 0); err != nil {
 				return err
 			}
 			return nil
@@ -318,7 +380,11 @@ func init() {
 				return err
 			}
 			if in.TemplateRef != nil && in.Template == nil {
-				return errors.New("objects with a template ref cannot be converted to older objects, must populate template")
+				return &newer.ConversionError{
+					In:      in,
+					Out:     out,
+					Message: "objects with a template ref cannot be converted to older objects, must populate template",
+				}
 			}
 			if in.Template != nil {
 				if err := s.Convert(in.Template, &out.PodTemplate, 0); err != nil {
@@ -343,6 +409,7 @@ func init() {
 			if err := s.Convert(&in.Spec, &out.DesiredState.Manifest, 0); err != nil {
 				return err
 			}
+			out.DesiredState.Host = in.Spec.Host
 			if err := s.Convert(&in.ObjectMeta.Labels, &out.Labels, 0); err != nil {
 				return err
 			}
@@ -352,6 +419,7 @@ func init() {
 			if err := s.Convert(&in.DesiredState.Manifest, &out.Spec, 0); err != nil {
 				return err
 			}
+			out.Spec.Host = in.DesiredState.Host
 			if err := s.Convert(&in.Labels, &out.ObjectMeta.Labels, 0); err != nil {
 				return err
 			}
@@ -381,6 +449,7 @@ func init() {
 			if err := s.Convert(&in.RestartPolicy, &out.RestartPolicy, 0); err != nil {
 				return err
 			}
+			out.DNSPolicy = DNSPolicy(in.DNSPolicy)
 			out.Version = "v1beta2"
 			return nil
 		},
@@ -394,6 +463,7 @@ func init() {
 			if err := s.Convert(&in.RestartPolicy, &out.RestartPolicy, 0); err != nil {
 				return err
 			}
+			out.DNSPolicy = newer.DNSPolicy(in.DNSPolicy)
 			return nil
 		},
 
@@ -418,6 +488,10 @@ func init() {
 			out.ContainerPort = in.Spec.ContainerPort
 			out.PortalIP = in.Spec.PortalIP
 			out.ProxyPort = in.Spec.ProxyPort
+			if err := s.Convert(&in.Spec.SessionAffinity, &out.SessionAffinity, 0); err != nil {
+				return err
+			}
+
 			return nil
 		},
 		func(in *Service, out *newer.Service, s conversion.Scope) error {
@@ -441,10 +515,14 @@ func init() {
 			out.Spec.ContainerPort = in.ContainerPort
 			out.Spec.PortalIP = in.PortalIP
 			out.Spec.ProxyPort = in.ProxyPort
+			if err := s.Convert(&in.SessionAffinity, &out.Spec.SessionAffinity, 0); err != nil {
+				return err
+			}
+
 			return nil
 		},
 
-		func(in *newer.Minion, out *Minion, s conversion.Scope) error {
+		func(in *newer.Node, out *Minion, s conversion.Scope) error {
 			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
 				return err
 			}
@@ -454,11 +532,17 @@ func init() {
 			if err := s.Convert(&in.ObjectMeta.Labels, &out.Labels, 0); err != nil {
 				return err
 			}
+			if err := s.Convert(&in.Status.Phase, &out.Status.Phase, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Status.Conditions, &out.Status.Conditions, 0); err != nil {
+				return err
+			}
 
 			out.HostIP = in.Status.HostIP
 			return s.Convert(&in.Spec.Capacity, &out.NodeResources.Capacity, 0)
 		},
-		func(in *Minion, out *newer.Minion, s conversion.Scope) error {
+		func(in *Minion, out *newer.Node, s conversion.Scope) error {
 			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
 				return err
 			}
@@ -466,6 +550,12 @@ func init() {
 				return err
 			}
 			if err := s.Convert(&in.Labels, &out.ObjectMeta.Labels, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Status.Phase, &out.Status.Phase, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Status.Conditions, &out.Status.Conditions, 0); err != nil {
 				return err
 			}
 
@@ -486,7 +576,6 @@ func init() {
 			return nil
 		},
 		func(in *newer.ObjectReference, out *ObjectReference, s conversion.Scope) error {
-			out.ID = in.Name
 			out.Kind = in.Kind
 			out.Namespace = in.Namespace
 			out.ID = in.Name
@@ -496,5 +585,131 @@ func init() {
 			out.FieldPath = in.FieldPath
 			return nil
 		},
+
+		// Event Source <-> Source.Component
+		// Event Host <-> Source.Host
+		// TODO: remove this when it becomes possible to specify a field name conversion on a specific type
+		func(in *newer.Event, out *Event, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			out.Reason = in.Reason
+			out.Message = in.Message
+			out.Source = in.Source.Component
+			out.Host = in.Source.Host
+			out.Timestamp = in.Timestamp
+			return s.Convert(&in.InvolvedObject, &out.InvolvedObject, 0)
+		},
+		func(in *Event, out *newer.Event, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
+				return err
+			}
+			out.Reason = in.Reason
+			out.Message = in.Message
+			out.Source.Component = in.Source
+			out.Source.Host = in.Host
+			out.Timestamp = in.Timestamp
+			return s.Convert(&in.InvolvedObject, &out.InvolvedObject, 0)
+		},
+
+		// This is triggered for the Memory field of Container.
+		func(in *int64, out *resource.Quantity, s conversion.Scope) error {
+			out.Set(*in)
+			out.Format = resource.BinarySI
+			return nil
+		},
+		func(in *resource.Quantity, out *int64, s conversion.Scope) error {
+			*out = in.Value()
+			return nil
+		},
+
+		// This is triggered by the CPU field of Container.
+		// Note that if we add other int/Quantity conversions my
+		// simple hack (int64=Value(), int=MilliValue()) here won't work.
+		func(in *int, out *resource.Quantity, s conversion.Scope) error {
+			out.SetMilli(int64(*in))
+			out.Format = resource.DecimalSI
+			return nil
+		},
+		func(in *resource.Quantity, out *int, s conversion.Scope) error {
+			*out = int(in.MilliValue())
+			return nil
+		},
+
+		// Convert resource lists.
+		func(in *ResourceList, out *newer.ResourceList, s conversion.Scope) error {
+			*out = newer.ResourceList{}
+			for k, v := range *in {
+				fv, err := strconv.ParseFloat(v.String(), 64)
+				if err != nil {
+					return &newer.ConversionError{
+						In: in, Out: out,
+						Message: fmt.Sprintf("value '%v' of '%v': %v", v, k, err),
+					}
+				}
+				if k == ResourceCPU {
+					(*out)[newer.ResourceCPU] = *resource.NewMilliQuantity(int64(fv*1000), resource.DecimalSI)
+				} else {
+					(*out)[newer.ResourceName(k)] = *resource.NewQuantity(int64(fv), resource.BinarySI)
+				}
+			}
+			return nil
+		},
+		func(in *newer.ResourceList, out *ResourceList, s conversion.Scope) error {
+			*out = ResourceList{}
+			for k, v := range *in {
+				if k == newer.ResourceCPU {
+					(*out)[ResourceCPU] = util.NewIntOrStringFromString(fmt.Sprintf("%v", float64(v.MilliValue())/1000))
+				} else {
+					(*out)[ResourceName(k)] = util.NewIntOrStringFromInt(int(v.Value()))
+				}
+			}
+			return nil
+		},
+
+		// VolumeSource's HostDir is deprecated in favor of HostPath.
+		// TODO: It would be great if I could just map field names to
+		// convert or else maybe say "convert all members of this
+		// struct" and then fix up only the stuff that changed.
+		func(in *newer.VolumeSource, out *VolumeSource, s conversion.Scope) error {
+			if err := s.Convert(&in.EmptyDir, &out.EmptyDir, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.GitRepo, &out.GitRepo, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.GCEPersistentDisk, &out.GCEPersistentDisk, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.HostPath, &out.HostDir, 0); err != nil {
+				return err
+			}
+			return nil
+		},
+		func(in *VolumeSource, out *newer.VolumeSource, s conversion.Scope) error {
+			if err := s.Convert(&in.EmptyDir, &out.EmptyDir, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.GitRepo, &out.GitRepo, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.GCEPersistentDisk, &out.GCEPersistentDisk, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.HostDir, &out.HostPath, 0); err != nil {
+				return err
+			}
+			return nil
+		},
 	)
+	if err != nil {
+		// If one of the conversion functions is malformed, detect it immediately.
+		panic(err)
+	}
 }

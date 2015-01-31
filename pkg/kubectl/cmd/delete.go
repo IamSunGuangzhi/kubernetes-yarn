@@ -20,15 +20,21 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl"
 	"github.com/spf13/cobra"
+
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/resource"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 )
 
 func (f *Factory) NewCmdDelete(out io.Writer) *cobra.Command {
+	flags := &struct {
+		Filenames util.StringList
+	}{}
 	cmd := &cobra.Command{
-		Use:   "delete ([-f filename] | (<resource> <id>))",
+		Use:   "delete ([-f filename] | (<resource> [(<id> | -l <label>)]",
 		Short: "Delete a resource by filename, stdin or resource and id",
-		Long: `Delete a resource by filename, stdin or resource and id.
+		Long: `Delete a resource by filename, stdin, resource and id or by resources and label selector.
 
 JSON and YAML formats are accepted.
 
@@ -46,19 +52,41 @@ Examples:
   $ cat pod.json | kubectl delete -f -
   <delete a pod based on the type and id in the json passed into stdin>
 
+  $ kubectl delete pods,services -l name=myLabel
+  <delete pods and services with label name=myLabel>
+
   $ kubectl delete pod 1234-56-7890-234234-456456
   <delete a pod with ID 1234-56-7890-234234-456456>`,
 		Run: func(cmd *cobra.Command, args []string) {
-			filename := GetFlagString(cmd, "filename")
-			mapping, namespace, name := ResourceFromArgsOrFile(cmd, args, filename, f.Typer, f.Mapper)
-			client, err := f.Client(cmd, mapping)
+			cmdNamespace, err := f.DefaultNamespace(cmd)
 			checkErr(err)
 
-			err = kubectl.NewRESTHelper(client, mapping).Delete(namespace, name)
+			mapper, typer := f.Object(cmd)
+			r := resource.NewBuilder(mapper, typer, ClientMapperForCommand(cmd, f)).
+				ContinueOnError().
+				NamespaceParam(cmdNamespace).DefaultNamespace().
+				FilenameParam(flags.Filenames...).
+				SelectorParam(GetFlagString(cmd, "selector")).
+				ResourceTypeOrNameArgs(args...).
+				Flatten().
+				Do()
+
+			found := 0
+			err = r.IgnoreErrors(errors.IsNotFound).Visit(func(r *resource.Info) error {
+				found++
+				if err := resource.NewHelper(r.Client, r.Mapping).Delete(r.Namespace, r.Name); err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "%s\n", r.Name)
+				return nil
+			})
 			checkErr(err)
-			fmt.Fprintf(out, "%s\n", name)
+			if found == 0 {
+				fmt.Fprintf(cmd.Out(), "No resources found\n")
+			}
 		},
 	}
-	cmd.Flags().StringP("filename", "f", "", "Filename or URL to file to use to delete the resource")
+	cmd.Flags().VarP(&flags.Filenames, "filename", "f", "Filename, directory, or URL to a file containing the resource to delete")
+	cmd.Flags().StringP("selector", "l", "", "Selector (label query) to filter on")
 	return cmd
 }

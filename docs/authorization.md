@@ -2,7 +2,7 @@
 
 
 In Kubernetes, authorization happens as a separate step from authentication.
-See the [authentication documentation](../authn_plugins/README.md) for an 
+See the [authentication documentation](./authentication.md) for an 
 overview of authentication.
 
 Authorization applies to all HTTP accesses on the main apiserver port. (The
@@ -100,4 +100,4 @@ An authorization module can be completely implemented in go, or can call out
 to a remote authorization service.  Authorization modules can implement
 their own caching to reduce the cost of repeated authorization calls with the
 same or similar arguments.  Developers should then consider the interaction between
-caching and revokation of permissions.
+caching and revocation of permissions.

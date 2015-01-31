@@ -1,3 +1,9 @@
+## kubectl
+The ```kubectl``` command provides command line access to the kubernetes API.
+
+See [kubectl documentation](kubectl.md) for details.
+
+## kubecfg is deprecated.  Please use kubectl!
 ## kubecfg command line interface
 The `kubecfg` command line tools is used to interact with the Kubernetes HTTP API.
 

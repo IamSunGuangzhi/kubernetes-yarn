@@ -114,6 +114,10 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan apiserver.RE
 			if rs.cloud == nil {
 				return nil, fmt.Errorf("requested an external service, but no cloud provider supplied.")
 			}
+			if service.Spec.Protocol != api.ProtocolTCP {
+				// TODO: Support UDP here too.
+				return nil, fmt.Errorf("external load balancers for non TCP services are not currently supported.")
+			}
 			balancer, ok := rs.cloud.TCPLoadBalancer()
 			if !ok {
 				return nil, fmt.Errorf("the cloud provider does not support external TCP load balancers.")
@@ -130,16 +134,21 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan apiserver.RE
 			if err != nil {
 				return nil, err
 			}
+			// TODO: We should be able to rely on valid input, and not do defaulting here.
+			var affinityType api.AffinityType = service.Spec.SessionAffinity
+			if affinityType == "" {
+				affinityType = api.AffinityTypeNone
+			}
 			if len(service.Spec.PublicIPs) > 0 {
 				for _, publicIP := range service.Spec.PublicIPs {
-					_, err = balancer.CreateTCPLoadBalancer(service.Name, zone.Region, net.ParseIP(publicIP), service.Spec.Port, hostsFromMinionList(hosts))
+					_, err = balancer.CreateTCPLoadBalancer(service.Name, zone.Region, net.ParseIP(publicIP), service.Spec.Port, hostsFromMinionList(hosts), affinityType)
 					if err != nil {
 						// TODO: have to roll-back any successful calls.
 						return nil, err
 					}
 				}
 			} else {
-				ip, err := balancer.CreateTCPLoadBalancer(service.Name, zone.Region, nil, service.Spec.Port, hostsFromMinionList(hosts))
+				ip, err := balancer.CreateTCPLoadBalancer(service.Name, zone.Region, nil, service.Spec.Port, hostsFromMinionList(hosts), affinityType)
 				if err != nil {
 					return nil, err
 				}
@@ -154,7 +163,7 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan apiserver.RE
 	}), nil
 }
 
-func hostsFromMinionList(list *api.MinionList) []string {
+func hostsFromMinionList(list *api.NodeList) []string {
 	result := make([]string, len(list.Items))
 	for ix := range list.Items {
 		result[ix] = list.Items[ix].Name
@@ -205,6 +214,10 @@ func (rs *REST) Watch(ctx api.Context, label, field labels.Selector, resourceVer
 }
 
 func (*REST) New() runtime.Object {
+	return &api.Service{}
+}
+
+func (*REST) NewList() runtime.Object {
 	return &api.Service{}
 }
 

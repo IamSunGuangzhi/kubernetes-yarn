@@ -16,8 +16,8 @@ limitations under the License.
 
 // simplegen is a tool to generate simple services from a simple description
 //
-// $ simplegen myservice.json | kubectl createall -f -
-// $ simplegen myservice.yaml | kubectl createall -f -
+// $ simplegen myservice.json | kubectl create -f -
+// $ simplegen myservice.yaml | kubectl create -f -
 //
 // This is completely separate from kubectl at the moment, until we figure out
 // what the right integration approach is.
@@ -35,8 +35,8 @@ import (
 	// TODO: handle multiple versions correctly
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/v1beta1"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
+	"github.com/ghodss/yaml"
 	"github.com/golang/glog"
-	"gopkg.in/v1/yaml"
 )
 
 // TODO: Also handle lists of simple services, and multiple input files
@@ -45,18 +45,18 @@ const usage = "usage: simplegen filename"
 
 type SimpleService struct {
 	// Optional: Defaults to image base name if not specified
-	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+	Name string `json:"name,omitempty"`
 	// Required.
-	Image string `yaml:"image" json:"image"`
+	Image string `json:"image"`
 	// Optional: Defaults to one
-	Replicas int `yaml:"replicas,omitempty" json:"replicas,omitempty"`
+	Replicas int `json:"replicas,omitempty"`
 	// Optional: Creates a service if specified: servicePort:containerPort
-	PortSpec string `yaml:"portSpec,omitempty" json:"portSpec,omitempty"`
+	PortSpec string `json:"portSpec,omitempty"`
 }
 
 func checkErr(err error) {
 	if err != nil {
-		glog.Fatalf("%v", err)
+		glog.FatalDepth(1, err)
 	}
 }
 

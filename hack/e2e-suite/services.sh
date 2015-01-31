@@ -33,6 +33,20 @@ function sort_args() {
   printf "%s\n" "$@" | sort -n | tr '\n\r' ' ' | sed 's/  */ /g'
 }
 
+# Join args $2... with $1 between them.
+# Example: join ", " x y z   =>   x, y, z
+function join() {
+  local sep item
+  sep=$1
+  shift
+  echo -n "${1:-}"
+  shift
+  for item; do
+    echo -n "${sep}${item}"
+  done
+  echo
+}
+
 svcs_to_clean=()
 function do_teardown() {
   local svc
@@ -45,10 +59,70 @@ function do_teardown() {
 #   $1: service name
 #   $2: service port
 #   $3: service replica count
+#   $4: public IPs (optional, string e.g. "1.2.3.4 5.6.7.8")
 function start_service() {
   echo "Starting service '$1' on port $2 with $3 replicas"
   svcs_to_clean+=("$1")
-  ${KUBECFG} -s "$2" -p 9376 run kubernetes/serve_hostname "$3" "$1"
+  ${KUBECTL} create -f - << __EOF__
+      {
+          "kind": "ReplicationController",
+          "apiVersion": "v1beta1",
+          "id": "$1",
+          "namespace": "default",
+          "desiredState": {
+              "replicas": $3,
+              "replicaSelector": {
+                  "name": "$1"
+              },
+              "podTemplate": {
+                  "desiredState": {
+                      "manifest": {
+                          "version": "v1beta2",
+                          "containers": [
+                              {
+                                  "name": "$1",
+                                  "image": "kubernetes/serve_hostname",
+                                  "ports": [
+                                      {
+                                          "containerPort": 9376,
+                                          "protocol": "TCP"
+                                      }
+                                  ]
+                              }
+                          ]
+                      }
+                  },
+                  "labels": {
+                      "name": "$1"
+                  }
+              }
+          }
+      }
+__EOF__
+  # Convert '1.2.3.4 5.6.7.8' => '"1.2.3.4", "5.6.7.8"'
+  local ip ips_array=() public_ips
+  for ip in ${4:-}; do
+    ips_array+=("\"${ip}\"")
+  done
+  public_ips=$(join ", " "${ips_array[@]:+${ips_array[@]}}")
+  ${KUBECTL} create -f - << __EOF__
+      {
+          "kind": "Service",
+          "apiVersion": "v1beta1",
+          "id": "$1",
+          "namespace": "default",
+          "port": $2,
+          "protocol": "TCP",
+          "labels": {
+              "name": "$1"
+          },
+          "selector": {
+              "name": "$1"
+          },
+          "containerPort": 9376,
+          "publicIPs": [ ${public_ips} ]
+      }
+__EOF__
 }
 
 # Args:
@@ -126,6 +200,7 @@ function wait_for_pods() {
 #   $5: pod IDs
 function wait_for_service_up() {
   local i
+  local found_pods
   for i in $(seq 1 20); do
     results=($(ssh-to-node "${test_node}" "
         set -e;
@@ -133,7 +208,9 @@ function wait_for_service_up() {
           curl -s --connect-timeout 1 http://$2:$3;
         done | sort | uniq
         "))
+
     found_pods=$(sort_args "${results[@]:+${results[@]}}")
+    echo "Checking if ${found_pods} == ${5}"
     if [[ "${found_pods}" == "$5" ]]; then
       break
     fi
@@ -172,7 +249,17 @@ function verify_from_container() {
       sudo docker pull busybox >/dev/null;
       sudo docker run busybox sh -c '
           for i in $(seq -s' ' 1 $4); do
-            wget -q -T 1 -O - http://$2:$3;
+            ok=false
+            for j in $(seq -s' ' 1 10); do
+              if wget -q -T 1 -O - http://$2:$3; then
+		ok=true
+                break
+              fi
+              sleep 1
+            done
+            if [[ \${ok} == false ]]; then
+              exit 1
+            fi
           done
       '")) \
       || error "testing $1 portal from container failed"
@@ -197,7 +284,8 @@ master="${MASTER_NAME}"
 svc1_name="service1"
 svc1_port=80
 svc1_count=3
-start_service "${svc1_name}" "${svc1_port}" "${svc1_count}"
+svc1_publics="192.168.1.1 192.168.1.2"
+start_service "${svc1_name}" "${svc1_port}" "${svc1_count}" "${svc1_publics}"
 
 svc2_name="service2"
 svc2_port=80
@@ -224,20 +312,30 @@ fi
 #
 # Test 1: Prove that the service portal is alive.
 #
+echo "Test 1: Prove that the service portal is alive."
 echo "Verifying the portals from the host"
 wait_for_service_up "${svc1_name}" "${svc1_ip}" "${svc1_port}" \
     "${svc1_count}" "${svc1_pods}"
+for ip in ${svc1_publics}; do
+  wait_for_service_up "${svc1_name}" "${ip}" "${svc1_port}" \
+      "${svc1_count}" "${svc1_pods}"
+done
 wait_for_service_up "${svc2_name}" "${svc2_ip}" "${svc2_port}" \
     "${svc2_count}" "${svc2_pods}"
 echo "Verifying the portals from a container"
 verify_from_container "${svc1_name}" "${svc1_ip}" "${svc1_port}" \
     "${svc1_count}" "${svc1_pods}"
+for ip in ${svc1_publics}; do
+  verify_from_container "${svc1_name}" "${ip}" "${svc1_port}" \
+      "${svc1_count}" "${svc1_pods}"
+done
 verify_from_container "${svc2_name}" "${svc2_ip}" "${svc2_port}" \
     "${svc2_count}" "${svc2_pods}"
 
 #
 # Test 2: Bounce the proxy and make sure the portal comes back.
 #
+echo "Test 2: Bounce the proxy and make sure the portal comes back."
 echo "Restarting kube-proxy"
 restart-kube-proxy "${test_node}"
 echo "Verifying the portals from the host"
@@ -254,6 +352,7 @@ verify_from_container "${svc2_name}" "${svc2_ip}" "${svc2_port}" \
 #
 # Test 3: Stop one service and make sure it is gone.
 #
+echo "Test 3: Stop one service and make sure it is gone."
 stop_service "${svc1_name}"
 wait_for_service_down "${svc1_name}" "${svc1_ip}" "${svc1_port}"
 
@@ -261,6 +360,7 @@ wait_for_service_down "${svc1_name}" "${svc1_ip}" "${svc1_port}"
 # Test 4: Bring up another service.
 # TODO: Actually add a test to force re-use.
 #
+echo "Test 4: Bring up another service."
 svc3_name="service3"
 svc3_port=80
 svc3_count=3
@@ -286,8 +386,12 @@ verify_from_container "${svc3_name}" "${svc3_ip}" "${svc3_port}" \
 #
 # Test 5: Remove the iptables rules, make sure they come back.
 #
+echo "Test 5: Remove the iptables rules, make sure they come back."
 echo "Manually removing iptables rules"
-ssh-to-node "${test_node}" "sudo iptables -t nat -F KUBE-PROXY"
+# Remove both the new and old style chains, in case we're testing on an old kubelet
+ssh-to-node "${test_node}" "sudo iptables -t nat -F KUBE-PORTALS-HOST || true"
+ssh-to-node "${test_node}" "sudo iptables -t nat -F KUBE-PORTALS-CONTAINER || true"
+ssh-to-node "${test_node}" "sudo iptables -t nat -F KUBE-PROXY || true"
 echo "Verifying the portals from the host"
 wait_for_service_up "${svc3_name}" "${svc3_ip}" "${svc3_port}" \
     "${svc3_count}" "${svc3_pods}"
@@ -298,6 +402,7 @@ verify_from_container "${svc3_name}" "${svc3_ip}" "${svc3_port}" \
 #
 # Test 6: Restart the master, make sure portals come back.
 #
+echo "Test 6: Restart the master, make sure portals come back."
 echo "Restarting the master"
 ssh-to-node "${master}" "sudo /etc/init.d/kube-apiserver restart"
 sleep 5
@@ -311,6 +416,7 @@ verify_from_container "${svc3_name}" "${svc3_ip}" "${svc3_port}" \
 #
 # Test 7: Bring up another service, make sure it does not re-use Portal IPs.
 #
+echo "Test 7: Bring up another service, make sure it does not re-use Portal IPs."
 svc4_name="service4"
 svc4_port=80
 svc4_count=3

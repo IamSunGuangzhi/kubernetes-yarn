@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
+	rc "github.com/GoogleCloudPlatform/kubernetes/pkg/controller"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
@@ -62,7 +63,7 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan apiserver.RE
 	}
 
 	if len(controller.Name) == 0 {
-		controller.Name = util.NewUUID().String()
+		controller.Name = string(util.NewUUID())
 	}
 	if errs := validation.ValidateReplicationController(controller); len(errs) > 0 {
 		return nil, errors.NewInvalid("replicationController", controller.Name, errs)
@@ -121,6 +122,10 @@ func (*REST) New() runtime.Object {
 	return &api.ReplicationController{}
 }
 
+func (*REST) NewList() runtime.Object {
+	return &api.ReplicationControllerList{}
+}
+
 // Update replaces a given ReplicationController instance with an existing
 // instance in storage.registry.
 func (rs *REST) Update(ctx api.Context, obj runtime.Object) (<-chan apiserver.RESTResult, error) {
@@ -146,43 +151,10 @@ func (rs *REST) Update(ctx api.Context, obj runtime.Object) (<-chan apiserver.RE
 // Watch returns ReplicationController events via a watch.Interface.
 // It implements apiserver.ResourceWatcher.
 func (rs *REST) Watch(ctx api.Context, label, field labels.Selector, resourceVersion string) (watch.Interface, error) {
-	if !field.Empty() {
-		return nil, fmt.Errorf("no field selector implemented for controllers")
-	}
-	incoming, err := rs.registry.WatchControllers(ctx, resourceVersion)
-	if err != nil {
-		return nil, err
-	}
-	// TODO(lavalamp): remove watch.Filter, which is broken. Implement consistent way of filtering.
-	// TODO(lavalamp): this watch method needs a test.
-	return watch.Filter(incoming, func(e watch.Event) (watch.Event, bool) {
-		controller, ok := e.Object.(*api.ReplicationController)
-		if !ok {
-			// must be an error event-- pass it on
-			return e, true
-		}
-		match := label.Matches(labels.Set(controller.Labels))
-		if match {
-			rs.fillCurrentState(ctx, controller)
-		}
-		return e, match
-	}), nil
+	return rs.registry.WatchControllers(ctx, label, field, resourceVersion)
 }
 
-func (rs *REST) waitForController(ctx api.Context, controller *api.ReplicationController) (runtime.Object, error) {
-	for {
-		pods, err := rs.podLister.ListPods(ctx, labels.Set(controller.Spec.Selector).AsSelector())
-		if err != nil {
-			return controller, err
-		}
-		if len(pods.Items) == controller.Spec.Replicas {
-			break
-		}
-		time.Sleep(rs.pollPeriod)
-	}
-	return controller, nil
-}
-
+// TODO #2726: The controller should populate the current state, not the apiserver
 func (rs *REST) fillCurrentState(ctx api.Context, controller *api.ReplicationController) error {
 	if rs.podLister == nil {
 		return nil
@@ -191,6 +163,6 @@ func (rs *REST) fillCurrentState(ctx api.Context, controller *api.ReplicationCon
 	if err != nil {
 		return err
 	}
-	controller.Status.Replicas = len(list.Items)
+	controller.Status.Replicas = len(rc.FilterActivePods(list.Items))
 	return nil
 }

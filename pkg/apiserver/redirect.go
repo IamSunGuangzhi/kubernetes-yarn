@@ -20,6 +20,7 @@ import (
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/httplog"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 )
@@ -30,29 +31,30 @@ type RedirectHandler struct {
 }
 
 func (r *RedirectHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	ctx := api.NewDefaultContext()
-	namespace := req.URL.Query().Get("namespace")
-	if len(namespace) > 0 {
-		ctx = api.WithNamespace(ctx, namespace)
+	namespace, kind, parts, err := KindAndNamespace(req)
+	if err != nil {
+		notFound(w, req)
+		return
 	}
-	parts := splitPath(req.URL.Path)
+	ctx := api.WithNamespace(api.NewContext(), namespace)
+
+	// redirection requires /kind/resourceName path parts
 	if len(parts) != 2 || req.Method != "GET" {
 		notFound(w, req)
 		return
 	}
-	resourceName := parts[0]
 	id := parts[1]
-	storage, ok := r.storage[resourceName]
+	storage, ok := r.storage[kind]
 	if !ok {
-		httplog.LogOf(req, w).Addf("'%v' has no storage object", resourceName)
+		httplog.LogOf(req, w).Addf("'%v' has no storage object", kind)
 		notFound(w, req)
 		return
 	}
 
 	redirector, ok := storage.(Redirector)
 	if !ok {
-		httplog.LogOf(req, w).Addf("'%v' is not a redirector", resourceName)
-		notFound(w, req)
+		httplog.LogOf(req, w).Addf("'%v' is not a redirector", kind)
+		errorJSON(errors.NewMethodNotSupported(kind, "redirect"), r.codec, w)
 		return
 	}
 

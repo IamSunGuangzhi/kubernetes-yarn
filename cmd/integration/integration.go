@@ -37,17 +37,18 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/testapi"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
-	minionControllerPkg "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/controller"
+	nodeControllerPkg "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/controller"
 	replicationControllerPkg "github.com/GoogleCloudPlatform/kubernetes/pkg/controller"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/health"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/config"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/volume/empty_dir"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/master"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/service"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/standalone"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/wait"
+	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/admission/admit"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/factory"
 
@@ -55,15 +56,14 @@ import (
 	"github.com/golang/glog"
 )
 
-const testRootDir = "/tmp/kubelet"
-
 var (
 	fakeDocker1, fakeDocker2 dockertools.FakeDockerClient
 )
 
 type fakeKubeletClient struct{}
 
-func (fakeKubeletClient) GetPodInfo(host, podNamespace, podID string) (api.PodInfo, error) {
+func (fakeKubeletClient) GetPodStatus(host, podNamespace, podID string) (api.PodStatusResult, error) {
+	glog.V(3).Infof("Trying to get container info for %v/%v/%v", host, podNamespace, podID)
 	// This is a horrible hack to get around the fact that we can't provide
 	// different port numbers per kubelet...
 	var c client.PodInfoGetter
@@ -81,7 +81,7 @@ func (fakeKubeletClient) GetPodInfo(host, podNamespace, podID string) (api.PodIn
 	default:
 		glog.Fatalf("Can't get info for: '%v', '%v - %v'", host, podNamespace, podID)
 	}
-	return c.GetPodInfo("localhost", podNamespace, podID)
+	return c.GetPodStatus("localhost", podNamespace, podID)
 }
 
 func (fakeKubeletClient) HealthCheck(host string) (health.Status, error) {
@@ -161,16 +161,19 @@ func startComponents(manifestURL string) (apiServerURL string) {
 		EnableLogsSupport: false,
 		APIPrefix:         "/api",
 		Authorizer:        apiserver.NewAlwaysAllowAuthorizer(),
-
-		ReadWritePort: portNumber,
-		ReadOnlyPort:  portNumber,
-		PublicAddress: host,
+		AdmissionControl:  admit.NewAlwaysAdmit(),
+		ReadWritePort:     portNumber,
+		ReadOnlyPort:      portNumber,
+		PublicAddress:     host,
 	})
 	handler.delegate = m.Handler
 
 	// Scheduler
-	schedulerConfigFactory := &factory.ConfigFactory{cl}
-	schedulerConfig := schedulerConfigFactory.Create()
+	schedulerConfigFactory := factory.NewConfigFactory(cl)
+	schedulerConfig, err := schedulerConfigFactory.Create()
+	if err != nil {
+		glog.Fatalf("Couldn't create scheduler config: %v", err)
+	}
 	scheduler.New(schedulerConfig).Run()
 
 	endpoints := service.NewEndpointController(cl)
@@ -183,32 +186,32 @@ func startComponents(manifestURL string) (apiServerURL string) {
 	controllerManager.Run(10 * time.Minute)
 
 	nodeResources := &api.NodeResources{}
-	minionController := minionControllerPkg.NewMinionController(nil, "", machineList, nodeResources, cl)
-	minionController.Run(10 * time.Second)
+	nodeController := nodeControllerPkg.NewNodeController(nil, "", machineList, nodeResources, cl)
+	nodeController.Run(10 * time.Second)
 
 	// Kubelet (localhost)
-	os.MkdirAll(testRootDir, 0750)
-	cfg1 := config.NewPodConfig(config.PodConfigNotificationSnapshotAndUpdates)
-	config.NewSourceEtcd(config.EtcdKeyForHost(machineList[0]), etcdClient, cfg1.Channel("etcd"))
-	config.NewSourceURL(manifestURL, 5*time.Second, cfg1.Channel("url"))
-	myKubelet := kubelet.NewIntegrationTestKubelet(machineList[0], testRootDir, &fakeDocker1)
-	go util.Forever(func() { myKubelet.Run(cfg1.Updates()) }, 0)
-	go util.Forever(func() {
-		kubelet.ListenAndServeKubeletServer(myKubelet, cfg1.Channel("http"), net.ParseIP("127.0.0.1"), 10250, true)
-	}, 0)
-
+	testRootDir := makeTempDirOrDie("kubelet_integ_1.")
+	glog.Infof("Using %s as root dir for kubelet #1", testRootDir)
+	standalone.SimpleRunKubelet(cl, nil, &fakeDocker1, machineList[0], testRootDir, manifestURL, "127.0.0.1", 10250, api.NamespaceDefault, empty_dir.ProbeVolumePlugins())
 	// Kubelet (machine)
 	// Create a second kubelet so that the guestbook example's two redis slaves both
 	// have a place they can schedule.
-	cfg2 := config.NewPodConfig(config.PodConfigNotificationSnapshotAndUpdates)
-	config.NewSourceEtcd(config.EtcdKeyForHost(machineList[1]), etcdClient, cfg2.Channel("etcd"))
-	otherKubelet := kubelet.NewIntegrationTestKubelet(machineList[1], testRootDir, &fakeDocker2)
-	go util.Forever(func() { otherKubelet.Run(cfg2.Updates()) }, 0)
-	go util.Forever(func() {
-		kubelet.ListenAndServeKubeletServer(otherKubelet, cfg2.Channel("http"), net.ParseIP("127.0.0.1"), 10251, true)
-	}, 0)
+	testRootDir = makeTempDirOrDie("kubelet_integ_2.")
+	glog.Infof("Using %s as root dir for kubelet #2", testRootDir)
+	standalone.SimpleRunKubelet(cl, nil, &fakeDocker2, machineList[1], testRootDir, "", "127.0.0.1", 10251, api.NamespaceDefault, empty_dir.ProbeVolumePlugins())
 
 	return apiServer.URL
+}
+
+func makeTempDirOrDie(prefix string) string {
+	tempDir, err := ioutil.TempDir("/tmp", prefix)
+	if err != nil {
+		glog.Fatalf("Can't make a temp rootdir: %v", err)
+	}
+	if err = os.MkdirAll(tempDir, 0750); err != nil {
+		glog.Fatalf("Can't mkdir(%q): %v", tempDir, err)
+	}
+	return tempDir
 }
 
 // podsOnMinions returns true when all of the selected pods exist on a minion.
@@ -220,7 +223,7 @@ func podsOnMinions(c *client.Client, pods api.PodList) wait.ConditionFunc {
 			if len(host) == 0 {
 				return false, nil
 			}
-			if _, err := podInfo.GetPodInfo(host, namespace, id); err != nil {
+			if _, err := podInfo.GetPodStatus(host, namespace, id); err != nil {
 				return false, nil
 			}
 		}
@@ -262,7 +265,7 @@ func runReplicationControllerTest(c *client.Client) {
 	glog.Infof("Done creating replication controllers")
 
 	// Give the controllers some time to actually create the pods
-	if err := wait.Poll(time.Second, time.Second*30, c.ControllerHasDesiredReplicas(controller)); err != nil {
+	if err := wait.Poll(time.Second, time.Second*30, client.ControllerHasDesiredReplicas(c, &controller)); err != nil {
 		glog.Fatalf("FAILED: pods never created %v", err)
 	}
 
@@ -291,7 +294,7 @@ func runAPIVersionsTest(c *client.Client) {
 
 func runSelfLinkTest(c *client.Client) {
 	var svc api.Service
-	err := c.Post().Path("services").Body(
+	err := c.Post().Resource("services").Body(
 		&api.Service{
 			ObjectMeta: api.ObjectMeta{
 				Name: "selflinktest",
@@ -317,7 +320,7 @@ func runSelfLinkTest(c *client.Client) {
 	}
 
 	var svcList api.ServiceList
-	err = c.Get().Path("services").Do().Into(&svcList)
+	err = c.Get().Resource("services").Do().Into(&svcList)
 	if err != nil {
 		glog.Fatalf("Failed listing services: %v", err)
 	}
@@ -350,7 +353,7 @@ func runSelfLinkTest(c *client.Client) {
 
 func runAtomicPutTest(c *client.Client) {
 	var svc api.Service
-	err := c.Post().Path("services").Body(
+	err := c.Post().Resource("services").Body(
 		&api.Service{
 			TypeMeta: api.TypeMeta{
 				APIVersion: latest.Version,
@@ -389,8 +392,8 @@ func runAtomicPutTest(c *client.Client) {
 				glog.Infof("Starting to update (%s, %s)", l, v)
 				var tmpSvc api.Service
 				err := c.Get().
-					Path("services").
-					Path(svc.Name).
+					Resource("services").
+					Name(svc.Name).
 					Do().
 					Into(&tmpSvc)
 				if err != nil {
@@ -403,7 +406,7 @@ func runAtomicPutTest(c *client.Client) {
 					tmpSvc.Spec.Selector[l] = v
 				}
 				glog.Infof("Posting update (%s, %s)", l, v)
-				err = c.Put().Path("services").Path(svc.Name).Body(&tmpSvc).Do().Error()
+				err = c.Put().Resource("services").Name(svc.Name).Body(&tmpSvc).Do().Error()
 				if err != nil {
 					if errors.IsConflict(err) {
 						glog.Infof("Conflict: (%s, %s)", l, v)
@@ -420,7 +423,7 @@ func runAtomicPutTest(c *client.Client) {
 		}(label, value)
 	}
 	wg.Wait()
-	if err := c.Get().Path("services").Path(svc.Name).Do().Into(&svc); err != nil {
+	if err := c.Get().Resource("services").Name(svc.Name).Do().Into(&svc); err != nil {
 		glog.Fatalf("Failed getting atomicService after writers are complete: %v", err)
 	}
 	if !reflect.DeepEqual(testLabels, labels.Set(svc.Spec.Selector)) {
@@ -434,7 +437,7 @@ func runMasterServiceTest(client *client.Client) {
 	var svcList api.ServiceList
 	err := client.Get().
 		Namespace("default").
-		Path("services").
+		Resource("services").
 		Do().
 		Into(&svcList)
 	if err != nil {
@@ -455,8 +458,8 @@ func runMasterServiceTest(client *client.Client) {
 		var ep api.Endpoints
 		err := client.Get().
 			Namespace("default").
-			Path("endpoints").
-			Path("kubernetes").
+			Resource("endpoints").
+			Name("kubernetes").
 			Do().
 			Into(&ep)
 		if err != nil {
@@ -472,8 +475,8 @@ func runMasterServiceTest(client *client.Client) {
 		var ep api.Endpoints
 		err := client.Get().
 			Namespace("default").
-			Path("endpoints").
-			Path("kubernetes-ro").
+			Resource("endpoints").
+			Name("kubernetes-ro").
 			Do().
 			Into(&ep)
 		if err != nil {
@@ -560,6 +563,7 @@ func runServiceTest(client *client.Client) {
 type testFunc func(*client.Client)
 
 func main() {
+	util.InitFlags()
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	util.ReallyCrash = true
 	util.InitLogs()
@@ -618,7 +622,7 @@ func main() {
 			createdPods.Insert(p[:n-8])
 		}
 	}
-	// We expect 5: 2 net containers + 2 pods from the replication controller +
+	// We expect 9: 2 net containers + 2 pods from the replication controller +
 	//              1 net container + 2 pods from the URL +
 	//              1 net container + 1 pod from the service test.
 	if len(createdPods) != 9 {

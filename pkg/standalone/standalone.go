@@ -18,32 +18,32 @@ package standalone
 
 import (
 	"fmt"
-	"math"
 	"net"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
-	minionControllerPkg "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/controller"
+
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/clientauth"
+	nodeControllerPkg "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/controller"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/controller"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/config"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/volume"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/master"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/resources"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/service"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler"
+	_ "github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/algorithmprovider"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/factory"
 
-	docker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/glog"
 )
-
-const testRootDir = "/tmp/kubelet"
 
 type delegateHandler struct {
 	delegate http.Handler
@@ -57,23 +57,33 @@ func (h *delegateHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusNotFound)
 }
 
-// Get a docker endpoint, either from the string passed in, or $DOCKER_HOST environment variables
-func GetDockerEndpoint(dockerEndpoint string) string {
-	var endpoint string
-	if len(dockerEndpoint) > 0 {
-		endpoint = dockerEndpoint
-	} else if len(os.Getenv("DOCKER_HOST")) > 0 {
-		endpoint = os.Getenv("DOCKER_HOST")
-	} else {
-		endpoint = "unix:///var/run/docker.sock"
+// TODO: replace this with clientcmd
+func GetAPIServerClient(authPath string, apiServerList util.StringList) (*client.Client, error) {
+	authInfo, err := clientauth.LoadFromFile(authPath)
+	if err != nil {
+		return nil, err
 	}
-	glog.Infof("Connecting to docker on %s", endpoint)
-
-	return endpoint
+	clientConfig, err := authInfo.MergeWithConfig(client.Config{})
+	if err != nil {
+		return nil, err
+	}
+	if len(apiServerList) < 1 {
+		return nil, fmt.Errorf("no api servers specified.")
+	}
+	// TODO: adapt Kube client to support LB over several servers
+	if len(apiServerList) > 1 {
+		glog.Infof("Multiple api servers specified.  Picking first one")
+	}
+	clientConfig.Host = apiServerList[0]
+	c, err := client.New(&clientConfig)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // RunApiServer starts an API server in a go routine.
-func RunApiServer(cl *client.Client, etcdClient tools.EtcdClient, addr string, port int) {
+func RunApiServer(cl *client.Client, etcdClient tools.EtcdClient, addr string, port int, masterServiceNamespace string) {
 	handler := delegateHandler{}
 
 	helper, err := master.NewEtcdHelper(etcdClient, "")
@@ -89,15 +99,16 @@ func RunApiServer(cl *client.Client, etcdClient tools.EtcdClient, addr string, p
 			Client: http.DefaultClient,
 			Port:   10250,
 		},
-		EnableLogsSupport: false,
-		APIPrefix:         "/api",
-		Authorizer:        apiserver.NewAlwaysAllowAuthorizer(),
+		EnableLogsSupport:    false,
+		EnableSwaggerSupport: true,
+		APIPrefix:            "/api",
+		Authorizer:           apiserver.NewAlwaysAllowAuthorizer(),
 
-		ReadWritePort: port,
-		ReadOnlyPort:  port,
-		PublicAddress: addr,
+		ReadWritePort:          port,
+		ReadOnlyPort:           port,
+		PublicAddress:          addr,
+		MasterServiceNamespace: masterServiceNamespace,
 	})
-
 	handler.delegate = m.InsecureHandler
 
 	go http.ListenAndServe(fmt.Sprintf("%s:%d", addr, port), &handler)
@@ -106,33 +117,24 @@ func RunApiServer(cl *client.Client, etcdClient tools.EtcdClient, addr string, p
 // RunScheduler starts up a scheduler in it's own goroutine
 func RunScheduler(cl *client.Client) {
 	// Scheduler
-	schedulerConfigFactory := &factory.ConfigFactory{cl}
-	schedulerConfig := schedulerConfigFactory.Create()
+	schedulerConfigFactory := factory.NewConfigFactory(cl)
+	schedulerConfig, err := schedulerConfigFactory.Create()
+	if err != nil {
+		glog.Fatalf("Couldn't create scheduler config: %v", err)
+	}
 	scheduler.New(schedulerConfig).Run()
 }
 
 // RunControllerManager starts a controller
 func RunControllerManager(machineList []string, cl *client.Client, nodeMilliCPU, nodeMemory int64) {
-	if int64(int(nodeMilliCPU)) != nodeMilliCPU {
-		glog.Warningf("node_milli_cpu is too big for platform. Clamping: %d -> %d",
-			nodeMilliCPU, math.MaxInt32)
-		nodeMilliCPU = math.MaxInt32
-	}
-
-	if int64(int(nodeMemory)) != nodeMemory {
-		glog.Warningf("node_memory is too big for platform. Clamping: %d -> %d",
-			nodeMemory, math.MaxInt32)
-		nodeMemory = math.MaxInt32
-	}
-
 	nodeResources := &api.NodeResources{
 		Capacity: api.ResourceList{
-			resources.CPU:    util.NewIntOrStringFromInt(int(nodeMilliCPU)),
-			resources.Memory: util.NewIntOrStringFromInt(int(nodeMemory)),
+			api.ResourceCPU:    *resource.NewMilliQuantity(nodeMilliCPU, resource.DecimalSI),
+			api.ResourceMemory: *resource.NewQuantity(nodeMemory, resource.BinarySI),
 		},
 	}
-	minionController := minionControllerPkg.NewMinionController(nil, "", machineList, nodeResources, cl)
-	minionController.Run(10 * time.Second)
+	nodeController := nodeControllerPkg.NewNodeController(nil, "", machineList, nodeResources, cl)
+	nodeController.Run(10 * time.Second)
 
 	endpoints := service.NewEndpointController(cl)
 	go util.Forever(func() { endpoints.SyncServiceEndpoints() }, time.Second*10)
@@ -141,20 +143,166 @@ func RunControllerManager(machineList []string, cl *client.Client, nodeMilliCPU,
 	controllerManager.Run(10 * time.Second)
 }
 
-// RunKubelet starts a Kubelet talking to dockerEndpoint
-func RunKubelet(etcdClient tools.EtcdClient, hostname, dockerEndpoint string) {
-	dockerClient, err := docker.NewClient(GetDockerEndpoint(dockerEndpoint))
+// SimpleRunKubelet is a simple way to start a Kubelet talking to dockerEndpoint, using an etcdClient.
+// Under the hood it calls RunKubelet (below)
+func SimpleRunKubelet(client *client.Client,
+	etcdClient tools.EtcdClient,
+	dockerClient dockertools.DockerInterface,
+	hostname, rootDir, manifestURL, address string,
+	port uint,
+	masterServiceNamespace string,
+	volumePlugins []volume.Plugin) {
+	kcfg := KubeletConfig{
+		KubeClient:            client,
+		EtcdClient:            etcdClient,
+		DockerClient:          dockerClient,
+		HostnameOverride:      hostname,
+		RootDirectory:         rootDir,
+		ManifestURL:           manifestURL,
+		NetworkContainerImage: kubelet.NetworkContainerImage,
+		Port:                    port,
+		Address:                 util.IP(net.ParseIP(address)),
+		EnableServer:            true,
+		EnableDebuggingHandlers: true,
+		SyncFrequency:           3 * time.Second,
+		MinimumGCAge:            10 * time.Second,
+		MaxContainerCount:       5,
+		MasterServiceNamespace:  masterServiceNamespace,
+		VolumePlugins:           volumePlugins,
+	}
+	RunKubelet(&kcfg)
+}
+
+// RunKubelet is responsible for setting up and running a kubelet.  It is used in three different applications:
+//   1 Integration tests
+//   2 Kubelet binary
+//   3 Standalone 'kubernetes' binary
+// Eventually, #2 will be replaced with instances of #3
+func RunKubelet(kcfg *KubeletConfig) {
+	kcfg.Hostname = util.GetHostname(kcfg.HostnameOverride)
+	if kcfg.KubeClient != nil {
+		kubelet.SetupEventSending(kcfg.KubeClient, kcfg.Hostname)
+	} else {
+		glog.Infof("No api server defined - no events will be sent.")
+	}
+	kubelet.SetupLogging()
+	kubelet.SetupCapabilities(kcfg.AllowPrivileged)
+
+	cfg := makePodSourceConfig(kcfg)
+	k, err := createAndInitKubelet(kcfg, cfg)
 	if err != nil {
-		glog.Fatal("Couldn't connect to docker.")
+		glog.Errorf("Failed to create kubelet: %s", err)
+		return
+	}
+	// process pods and exit.
+	if kcfg.Runonce {
+		if _, err := k.RunOnce(cfg.Updates()); err != nil {
+			glog.Errorf("--runonce failed: %v", err)
+		}
+	} else {
+		startKubelet(k, cfg, kcfg)
+	}
+}
+
+func startKubelet(k *kubelet.Kubelet, cfg *config.PodConfig, kc *KubeletConfig) {
+	// start the kubelet
+	go util.Forever(func() { k.Run(cfg.Updates()) }, 0)
+
+	// start the kubelet server
+	if kc.EnableServer {
+		go util.Forever(func() {
+			kubelet.ListenAndServeKubeletServer(k, net.IP(kc.Address), kc.Port, kc.EnableDebuggingHandlers)
+		}, 0)
+	}
+}
+
+func makePodSourceConfig(kc *KubeletConfig) *config.PodConfig {
+	// source of all configuration
+	cfg := config.NewPodConfig(config.PodConfigNotificationSnapshotAndUpdates)
+
+	// define file config source
+	if kc.ConfigFile != "" {
+		glog.Infof("Adding manifest file: %v", kc.ConfigFile)
+		config.NewSourceFile(kc.ConfigFile, kc.FileCheckFrequency, cfg.Channel(kubelet.FileSource))
 	}
 
-	// Kubelet (localhost)
-	os.MkdirAll(testRootDir, 0750)
-	cfg1 := config.NewPodConfig(config.PodConfigNotificationSnapshotAndUpdates)
-	config.NewSourceEtcd(config.EtcdKeyForHost(hostname), etcdClient, cfg1.Channel("etcd"))
-	myKubelet := kubelet.NewIntegrationTestKubelet(hostname, testRootDir, dockerClient)
-	go util.Forever(func() { myKubelet.Run(cfg1.Updates()) }, 0)
-	go util.Forever(func() {
-		kubelet.ListenAndServeKubeletServer(myKubelet, cfg1.Channel("http"), net.ParseIP("127.0.0.1"), 10250, true)
-	}, 0)
+	// define url config source
+	if kc.ManifestURL != "" {
+		glog.Infof("Adding manifest url: %v", kc.ManifestURL)
+		config.NewSourceURL(kc.ManifestURL, kc.HttpCheckFrequency, cfg.Channel(kubelet.HTTPSource))
+	}
+	if kc.EtcdClient != nil {
+		glog.Infof("Watching for etcd configs at %v", kc.EtcdClient.GetCluster())
+		config.NewSourceEtcd(config.EtcdKeyForHost(kc.Hostname), kc.EtcdClient, cfg.Channel(kubelet.EtcdSource))
+	}
+	if kc.KubeClient != nil {
+		glog.Infof("Watching apiserver")
+		config.NewSourceApiserver(kc.KubeClient, kc.Hostname, cfg.Channel(kubelet.ApiserverSource))
+	}
+	return cfg
+}
+
+type KubeletConfig struct {
+	EtcdClient              tools.EtcdClient
+	KubeClient              *client.Client
+	DockerClient            dockertools.DockerInterface
+	CAdvisorPort            uint
+	Address                 util.IP
+	AllowPrivileged         bool
+	HostnameOverride        string
+	RootDirectory           string
+	ConfigFile              string
+	ManifestURL             string
+	FileCheckFrequency      time.Duration
+	HttpCheckFrequency      time.Duration
+	Hostname                string
+	NetworkContainerImage   string
+	SyncFrequency           time.Duration
+	RegistryPullQPS         float64
+	RegistryBurst           int
+	MinimumGCAge            time.Duration
+	MaxContainerCount       int
+	ClusterDomain           string
+	ClusterDNS              util.IP
+	EnableServer            bool
+	EnableDebuggingHandlers bool
+	Port                    uint
+	Runonce                 bool
+	MasterServiceNamespace  string
+	VolumePlugins           []volume.Plugin
+}
+
+func createAndInitKubelet(kc *KubeletConfig, pc *config.PodConfig) (*kubelet.Kubelet, error) {
+	// TODO: block until all sources have delivered at least one update to the channel, or break the sync loop
+	// up into "per source" synchronizations
+
+	k, err := kubelet.NewMainKubelet(
+		kc.Hostname,
+		kc.DockerClient,
+		kc.EtcdClient,
+		kc.KubeClient,
+		kc.RootDirectory,
+		kc.NetworkContainerImage,
+		kc.SyncFrequency,
+		float32(kc.RegistryPullQPS),
+		kc.RegistryBurst,
+		kc.MinimumGCAge,
+		kc.MaxContainerCount,
+		pc.IsSourceSeen,
+		kc.ClusterDomain,
+		net.IP(kc.ClusterDNS),
+		kc.MasterServiceNamespace,
+		kc.VolumePlugins)
+
+	if err != nil {
+		return nil, err
+	}
+
+	k.BirthCry()
+
+	go k.GarbageCollectLoop()
+	go kubelet.MonitorCAdvisor(k, kc.CAdvisorPort)
+	kubelet.InitHealthChecking(k)
+
+	return k, nil
 }

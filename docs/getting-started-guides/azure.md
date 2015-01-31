@@ -12,7 +12,7 @@
 2. Get or build a [binary release](binary_release.md)
 3. If you want to build your own release, you need to have [Docker
 installed](https://docs.docker.com/installation/).  On Mac OS X you can use
-boot2docker.
+[boot2docker](http://boot2docker.io/).
 
 ### Setup
 The cluster setup scripts can setup Kubernetes for multiple targets. First modify `cluster/kube-env.sh` to specify azure:
@@ -59,7 +59,7 @@ You can create a pod like this:
 
 ```
 cd kubernetes
-cluster/kubecfg.sh -c api/examples/pod.json create /pods
+cluster/kubectl.sh create -f api/examples/pod.json
 ```
 
 Where pod.json contains something like:
@@ -101,19 +101,18 @@ Where pod.json contains something like:
 You can see your cluster's pods:
 
 ```
-cluster/kubecfg.sh list pods
+cluster/kubectl.sh get pods
 ```
 
 and delete the pod you just created:
 
 ```
-cluster/kubecfg.sh delete pods/php
+cluster/kubectl.sh delete pods php
 ```
 
 Look in `api/examples/` for more examples
 
 ### Tearing down the cluster
 ```
-cd kubernetes
 cluster/kube-down.sh
 ```

@@ -151,7 +151,7 @@ rax-boot-master() {
 
 # Copy cloud-config to KUBE_TEMP and work some sed magic
   sed -e "s|DISCOVERY_ID|${DISCOVERY_ID}|" \
-      -e "s|CLOUD_FILES_URL|${RELEASE_TMP_URL//&/\&}|" \
+      -e "s|CLOUD_FILES_URL|${RELEASE_TMP_URL//&/\\&}|" \
       -e "s|KUBE_USER|${KUBE_USER}|" \
       -e "s|KUBE_PASSWORD|${KUBE_PASSWORD}|" \
       -e "s|PORTAL_NET|${PORTAL_NET}|" \
@@ -183,10 +183,13 @@ rax-boot-minions() {
 
     sed -e "s|DISCOVERY_ID|${DISCOVERY_ID}|" \
         -e "s|INDEX|$((i + 1))|g" \
-        -e "s|CLOUD_FILES_URL|${RELEASE_TMP_URL//&/\&}|" \
+        -e "s|CLOUD_FILES_URL|${RELEASE_TMP_URL//&/\\&}|" \
         -e "s|ENABLE_NODE_MONITORING|${ENABLE_NODE_MONITORING:-false}|" \
         -e "s|ENABLE_NODE_LOGGING|${ENABLE_NODE_LOGGING:-false}|" \
         -e "s|LOGGING_DESTINATION|${LOGGING_DESTINATION:-}|" \
+        -e "s|ENABLE_CLUSTER_DNS|${ENABLE_CLUSTER_DNS:-false}|" \
+        -e "s|DNS_SERVER_IP|${DNS_SERVER_IP:-}|" \
+        -e "s|DNS_DOMAIN|${DNS_DOMAIN:-}|" \
     $(dirname $0)/rackspace/cloud-config/minion-cloud-config.yaml > $KUBE_TEMP/minion-cloud-config-$(($i + 1)).yaml
 
 
@@ -238,7 +241,20 @@ detect-minions() {
 detect-master() {
   KUBE_MASTER=${MASTER_NAME}
 
+  echo "Waiting for ${MASTER_NAME} IP Address."
+  echo
+  echo "  This will continually check to see if the master node has an IP address."
+  echo
+
   KUBE_MASTER_IP=$(nova show $KUBE_MASTER --minimal | grep accessIPv4 | awk '{print $4}')
+
+  while [ "${KUBE_MASTER_IP-|}" == "|" ]; do
+    KUBE_MASTER_IP=$(nova show $KUBE_MASTER --minimal | grep accessIPv4 | awk '{print $4}')
+    printf "."
+    sleep 2
+  done
+
+  echo "${KUBE_MASTER} IP Address is ${KUBE_MASTER_IP}"
 }
 
 # $1 should be the network you would like to get an IP address for
@@ -326,12 +342,20 @@ kube-up() {
   echo
 }
 
-function setup-monitoring {
+function setup-monitoring-firewall {
     echo "TODO"
 }
 
-function teardown-monitoring {
+function teardown-monitoring-firewall {
   echo "TODO"
+}
+
+function setup-logging-firewall {
+  echo "TODO: setup logging"
+}
+
+function teardown-logging-firewall {
+  echo "TODO: teardown logging"
 }
 
 # Perform preparations required to run e2e tests

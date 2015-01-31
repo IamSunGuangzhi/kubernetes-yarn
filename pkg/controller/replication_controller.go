@@ -21,9 +21,11 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 	"github.com/golang/glog"
 )
 
@@ -122,6 +124,10 @@ func (rm *ReplicationManager) watchControllers(resourceVersion *string) {
 				// that called us call us again.
 				return
 			}
+			if event.Type == watch.Error {
+				glog.Errorf("error from watch during sync: %v", errors.FromObject(event.Object))
+				continue
+			}
 			glog.V(4).Infof("Got watch: %#v", event)
 			rc, ok := event.Object.(*api.ReplicationController)
 			if !ok {
@@ -140,7 +146,8 @@ func (rm *ReplicationManager) watchControllers(resourceVersion *string) {
 	}
 }
 
-func (rm *ReplicationManager) filterActivePods(pods []api.Pod) []api.Pod {
+// Helper function. Also used in pkg/registry/controller, for now.
+func FilterActivePods(pods []api.Pod) []api.Pod {
 	var result []api.Pod
 	for _, value := range pods {
 		if api.PodSucceeded != value.Status.Phase &&
@@ -157,7 +164,7 @@ func (rm *ReplicationManager) syncReplicationController(controller api.Replicati
 	if err != nil {
 		return err
 	}
-	filteredList := rm.filterActivePods(podList.Items)
+	filteredList := FilterActivePods(podList.Items)
 	diff := len(filteredList) - controller.Spec.Replicas
 	if diff < 0 {
 		diff *= -1

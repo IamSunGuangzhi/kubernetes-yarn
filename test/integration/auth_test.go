@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/auth/user"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/master"
+	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/admission/admit"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/auth/authenticator/token/tokentest"
 )
 
@@ -58,77 +59,6 @@ func getTestTokenAuth() authenticator.Request {
 	tokenAuthenticator.Tokens[AliceToken] = &user.DefaultInfo{Name: "alice", UID: "1"}
 	tokenAuthenticator.Tokens[BobToken] = &user.DefaultInfo{Name: "bob", UID: "2"}
 	return bearertoken.New(tokenAuthenticator)
-}
-
-// TestWhoAmI passes a known Bearer Token to the master's /_whoami endpoint and checks that
-// the master authenticates the user.
-func TestWhoAmI(t *testing.T) {
-	deleteAllEtcdKeys()
-
-	// Set up a master
-
-	helper, err := master.NewEtcdHelper(newEtcdClient(), "v1beta1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	m := master.New(&master.Config{
-		EtcdHelper:        helper,
-		KubeletClient:     client.FakeKubeletClient{},
-		EnableLogsSupport: false,
-		EnableUISupport:   false,
-		APIPrefix:         "/api",
-		Authenticator:     getTestTokenAuth(),
-		Authorizer:        apiserver.NewAlwaysAllowAuthorizer(),
-	})
-
-	s := httptest.NewServer(m.Handler)
-	defer s.Close()
-
-	// TODO: also test TLS, using e.g NewUnsafeTLSTransport() and NewClientCertTLSTransport() (see pkg/client/helper.go)
-	transport := http.DefaultTransport
-
-	testCases := []struct {
-		name     string
-		token    string
-		expected string
-		succeeds bool
-	}{
-		{"Valid token", AliceToken, "AUTHENTICATED AS alice", true},
-		{"Unknown token", UnknownToken, "", false},
-		{"No token", "", "", false},
-	}
-	for _, tc := range testCases {
-		req, err := http.NewRequest("GET", s.URL+"/_whoami", nil)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tc.token))
-		func() {
-			resp, err := transport.RoundTrip(req)
-			defer resp.Body.Close()
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			if tc.succeeds {
-				body, err := ioutil.ReadAll(resp.Body)
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-
-				actual := string(body)
-				if tc.expected != actual {
-					t.Errorf("case: %s expected: %v got: %v", tc.name, tc.expected, actual)
-				}
-			} else {
-				if resp.StatusCode != http.StatusUnauthorized {
-					t.Errorf("case: %s expected Unauthorized, got: %v", tc.name, resp.StatusCode)
-				}
-
-			}
-		}()
-	}
 }
 
 // Bodies for requests used in subsequent tests.
@@ -292,7 +222,7 @@ func getTestRequests() []struct {
 		{"PUT", "/api/v1beta1/endpoints/a" + syncFlags, aEndpoints, code200},
 		{"GET", "/api/v1beta1/endpoints", "", code200},
 		{"GET", "/api/v1beta1/endpoints/a", "", code200},
-		{"DELETE", "/api/v1beta1/endpoints/a" + syncFlags, "", code400},
+		{"DELETE", "/api/v1beta1/endpoints/a" + syncFlags, "", code405},
 
 		// Normal methods on minions
 		{"GET", "/api/v1beta1/minions", "", code200},
@@ -305,7 +235,7 @@ func getTestRequests() []struct {
 		// Normal methods on events
 		{"GET", "/api/v1beta1/events", "", code200},
 		{"POST", "/api/v1beta1/events" + syncFlags, aEvent, code200},
-		{"PUT", "/api/v1beta1/events/a" + syncFlags, aEvent, code500}, // See #2114 about why 500
+		{"PUT", "/api/v1beta1/events/a" + syncFlags, aEvent, code405},
 		{"GET", "/api/v1beta1/events", "", code200},
 		{"GET", "/api/v1beta1/events", "", code200},
 		{"GET", "/api/v1beta1/events/a", "", code200},
@@ -315,10 +245,10 @@ func getTestRequests() []struct {
 		{"GET", "/api/v1beta1/bindings", "", code405},            // Bindings are write-only
 		{"POST", "/api/v1beta1/pods" + syncFlags, aPod, code200}, // Need a pod to bind or you get a 404
 		{"POST", "/api/v1beta1/bindings" + syncFlags, aBinding, code200},
-		{"PUT", "/api/v1beta1/bindings/a" + syncFlags, aBinding, code500}, // See #2114 about why 500
+		{"PUT", "/api/v1beta1/bindings/a" + syncFlags, aBinding, code405},
 		{"GET", "/api/v1beta1/bindings", "", code405},
-		{"GET", "/api/v1beta1/bindings/a", "", code404}, // No bindings instances
-		{"DELETE", "/api/v1beta1/bindings/a" + syncFlags, "", code404},
+		{"GET", "/api/v1beta1/bindings/a", "", code405}, // No bindings instances
+		{"DELETE", "/api/v1beta1/bindings/a" + syncFlags, "", code405},
 
 		// Non-existent object type.
 		{"GET", "/api/v1beta1/foo", "", code404},
@@ -363,17 +293,23 @@ func TestAuthModeAlwaysAllow(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	m := master.New(&master.Config{
+	var m *master.Master
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		m.Handler.ServeHTTP(w, req)
+	}))
+	defer s.Close()
+
+	m = master.New(&master.Config{
+		Client:            client.NewOrDie(&client.Config{Host: s.URL}),
 		EtcdHelper:        helper,
 		KubeletClient:     client.FakeKubeletClient{},
 		EnableLogsSupport: false,
 		EnableUISupport:   false,
 		APIPrefix:         "/api",
 		Authorizer:        apiserver.NewAlwaysAllowAuthorizer(),
+		AdmissionControl:  admit.NewAlwaysAdmit(),
 	})
 
-	s := httptest.NewServer(m.Handler)
-	defer s.Close()
 	transport := http.DefaultTransport
 
 	for _, r := range getTestRequests() {
@@ -408,17 +344,23 @@ func TestAuthModeAlwaysDeny(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	m := master.New(&master.Config{
+	var m *master.Master
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		m.Handler.ServeHTTP(w, req)
+	}))
+	defer s.Close()
+
+	m = master.New(&master.Config{
+		Client:            client.NewOrDie(&client.Config{Host: s.URL}),
 		EtcdHelper:        helper,
 		KubeletClient:     client.FakeKubeletClient{},
 		EnableLogsSupport: false,
 		EnableUISupport:   false,
 		APIPrefix:         "/api",
 		Authorizer:        apiserver.NewAlwaysDenyAuthorizer(),
+		AdmissionControl:  admit.NewAlwaysAdmit(),
 	})
 
-	s := httptest.NewServer(m.Handler)
-	defer s.Close()
 	transport := http.DefaultTransport
 
 	for _, r := range getTestRequests() {
@@ -467,7 +409,14 @@ func TestAliceNotForbiddenOrUnauthorized(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	m := master.New(&master.Config{
+	var m *master.Master
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		m.Handler.ServeHTTP(w, req)
+	}))
+	defer s.Close()
+
+	m = master.New(&master.Config{
+		Client:            client.NewOrDie(&client.Config{Host: s.URL}),
 		EtcdHelper:        helper,
 		KubeletClient:     client.FakeKubeletClient{},
 		EnableLogsSupport: false,
@@ -475,10 +424,9 @@ func TestAliceNotForbiddenOrUnauthorized(t *testing.T) {
 		APIPrefix:         "/api",
 		Authenticator:     getTestTokenAuth(),
 		Authorizer:        allowAliceAuthorizer{},
+		AdmissionControl:  admit.NewAlwaysAdmit(),
 	})
 
-	s := httptest.NewServer(m.Handler)
-	defer s.Close()
 	transport := http.DefaultTransport
 
 	for _, r := range getTestRequests() {
@@ -499,6 +447,8 @@ func TestAliceNotForbiddenOrUnauthorized(t *testing.T) {
 			}
 			if _, ok := r.statusCodes[resp.StatusCode]; !ok {
 				t.Errorf("Expected status one of %v, but got %v", r.statusCodes, resp.StatusCode)
+				b, _ := ioutil.ReadAll(resp.Body)
+				t.Errorf("Body: %v", string(b))
 			}
 		}()
 	}
@@ -519,7 +469,14 @@ func TestBobIsForbidden(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	m := master.New(&master.Config{
+	var m *master.Master
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		m.Handler.ServeHTTP(w, req)
+	}))
+	defer s.Close()
+
+	m = master.New(&master.Config{
+		Client:            client.NewOrDie(&client.Config{Host: s.URL}),
 		EtcdHelper:        helper,
 		KubeletClient:     client.FakeKubeletClient{},
 		EnableLogsSupport: false,
@@ -527,10 +484,9 @@ func TestBobIsForbidden(t *testing.T) {
 		APIPrefix:         "/api",
 		Authenticator:     getTestTokenAuth(),
 		Authorizer:        allowAliceAuthorizer{},
+		AdmissionControl:  admit.NewAlwaysAdmit(),
 	})
 
-	s := httptest.NewServer(m.Handler)
-	defer s.Close()
 	transport := http.DefaultTransport
 
 	for _, r := range getTestRequests() {
@@ -573,7 +529,14 @@ func TestUnknownUserIsUnauthorized(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	m := master.New(&master.Config{
+	var m *master.Master
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		m.Handler.ServeHTTP(w, req)
+	}))
+	defer s.Close()
+
+	m = master.New(&master.Config{
+		Client:            client.NewOrDie(&client.Config{Host: s.URL}),
 		EtcdHelper:        helper,
 		KubeletClient:     client.FakeKubeletClient{},
 		EnableLogsSupport: false,
@@ -581,10 +544,9 @@ func TestUnknownUserIsUnauthorized(t *testing.T) {
 		APIPrefix:         "/api",
 		Authenticator:     getTestTokenAuth(),
 		Authorizer:        allowAliceAuthorizer{},
+		AdmissionControl:  admit.NewAlwaysAdmit(),
 	})
 
-	s := httptest.NewServer(m.Handler)
-	defer s.Close()
 	transport := http.DefaultTransport
 
 	for _, r := range getTestRequests() {
@@ -645,7 +607,15 @@ func TestNamespaceAuthorization(t *testing.T) {
 
 	a := newAuthorizerWithContents(t, `{"namespace": "foo"}
 `)
-	m := master.New(&master.Config{
+
+	var m *master.Master
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		m.Handler.ServeHTTP(w, req)
+	}))
+	defer s.Close()
+
+	m = master.New(&master.Config{
+		Client:            client.NewOrDie(&client.Config{Host: s.URL}),
 		EtcdHelper:        helper,
 		KubeletClient:     client.FakeKubeletClient{},
 		EnableLogsSupport: false,
@@ -653,10 +623,9 @@ func TestNamespaceAuthorization(t *testing.T) {
 		APIPrefix:         "/api",
 		Authenticator:     getTestTokenAuth(),
 		Authorizer:        a,
+		AdmissionControl:  admit.NewAlwaysAdmit(),
 	})
 
-	s := httptest.NewServer(m.Handler)
-	defer s.Close()
 	transport := http.DefaultTransport
 
 	requests := []struct {
@@ -699,6 +668,8 @@ func TestNamespaceAuthorization(t *testing.T) {
 			}
 			if _, ok := r.statusCodes[resp.StatusCode]; !ok {
 				t.Errorf("Expected status one of %v, but got %v", r.statusCodes, resp.StatusCode)
+				b, _ := ioutil.ReadAll(resp.Body)
+				t.Errorf("Body: %v", string(b))
 			}
 		}()
 	}
@@ -720,7 +691,15 @@ func TestKindAuthorization(t *testing.T) {
 
 	a := newAuthorizerWithContents(t, `{"kind": "services"}
 `)
-	m := master.New(&master.Config{
+
+	var m *master.Master
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		m.Handler.ServeHTTP(w, req)
+	}))
+	defer s.Close()
+
+	m = master.New(&master.Config{
+		Client:            client.NewOrDie(&client.Config{Host: s.URL}),
 		EtcdHelper:        helper,
 		KubeletClient:     client.FakeKubeletClient{},
 		EnableLogsSupport: false,
@@ -728,10 +707,9 @@ func TestKindAuthorization(t *testing.T) {
 		APIPrefix:         "/api",
 		Authenticator:     getTestTokenAuth(),
 		Authorizer:        a,
+		AdmissionControl:  admit.NewAlwaysAdmit(),
 	})
 
-	s := httptest.NewServer(m.Handler)
-	defer s.Close()
 	transport := http.DefaultTransport
 
 	requests := []struct {
@@ -768,6 +746,8 @@ func TestKindAuthorization(t *testing.T) {
 			}
 			if _, ok := r.statusCodes[resp.StatusCode]; !ok {
 				t.Errorf("Expected status one of %v, but got %v", r.statusCodes, resp.StatusCode)
+				b, _ := ioutil.ReadAll(resp.Body)
+				t.Errorf("Body: %v", string(b))
 			}
 		}
 	}
@@ -789,7 +769,15 @@ func TestReadOnlyAuthorization(t *testing.T) {
 
 	a := newAuthorizerWithContents(t, `{"readonly": true}
 `)
-	m := master.New(&master.Config{
+
+	var m *master.Master
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		m.Handler.ServeHTTP(w, req)
+	}))
+	defer s.Close()
+
+	m = master.New(&master.Config{
+		Client:            client.NewOrDie(&client.Config{Host: s.URL}),
 		EtcdHelper:        helper,
 		KubeletClient:     client.FakeKubeletClient{},
 		EnableLogsSupport: false,
@@ -797,10 +785,9 @@ func TestReadOnlyAuthorization(t *testing.T) {
 		APIPrefix:         "/api",
 		Authenticator:     getTestTokenAuth(),
 		Authorizer:        a,
+		AdmissionControl:  admit.NewAlwaysAdmit(),
 	})
 
-	s := httptest.NewServer(m.Handler)
-	defer s.Close()
 	transport := http.DefaultTransport
 
 	requests := []struct {
@@ -831,6 +818,8 @@ func TestReadOnlyAuthorization(t *testing.T) {
 			}
 			if _, ok := r.statusCodes[resp.StatusCode]; !ok {
 				t.Errorf("Expected status one of %v, but got %v", r.statusCodes, resp.StatusCode)
+				b, _ := ioutil.ReadAll(resp.Body)
+				t.Errorf("Body: %v", string(b))
 			}
 		}()
 	}

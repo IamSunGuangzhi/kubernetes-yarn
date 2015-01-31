@@ -25,44 +25,124 @@ KUBE_ROOT=$(dirname "${BASH_SOURCE}")/../..
 source "${KUBE_ROOT}/cluster/kube-env.sh"
 source "${KUBE_ROOT}/cluster/$KUBERNETES_PROVIDER/util.sh"
 
-if [[ "$KUBERNETES_PROVIDER" != "gce" ]]; then
-    echo "PD test is only run for GCE"
-    return 0
+if [[ "$KUBERNETES_PROVIDER" != "gce" ]] && [[ "$KUBERNETES_PROVIDER" != "gke" ]]; then
+  echo "WARNING: Skipping pd.sh for cloud provider: ${KUBERNETES_PROVIDER}."
+  exit 0
 fi
 
-disk_name="e2e-$(date +%H-%M-%s)"
+disk_name="e2e-$(date +%s)"
 config="/tmp/${disk_name}.yaml"
+
+function delete_pd_pod() {
+  # Delete the pod this should unmount the PD
+  ${KUBECFG} delete pods/testpd
+  for i in $(seq 1 30); do
+    echo "Waiting for pod to be deleted."
+    sleep 5
+    all_running=0
+    for id in $pod_id_list; do
+      current_status=$($KUBECFG -template '{{.currentState.status}}' get pods/$id) || true
+      if [[ "$current_status" == "Running" ]]; then
+        all_running=1
+        break
+      fi
+    done
+    if [[ "${all_running}" == 0 ]]; then
+      break
+    fi
+  done
+  if [[ "${all_running}" == 1 ]]; then
+    echo "Pods did not delete in time"
+    exit 1
+  fi
+}
 
 function teardown() {
   echo "Cleaning up test artifacts"
-  ${KUBECFG} delete pods/testpd
+  delete_pd_pod
   rm -rf ${config}
-  echo "Waiting for disk to become unmounted"
-  sleep 20
-  gcloud compute disks delete --quiet --zone="${ZONE}" "${disk_name}"
+
+  # This should really work immediately after the pod is killed, but
+  # it doesn't (yet). So let's be resilient to that.
+  #
+  # TODO: After
+  # https://github.com/GoogleCloudPlatform/kubernetes/issues/3437 is
+  # fixed, this should be stricter.
+  echo "Trying to delete detached pd."
+  if ! gcloud compute disks delete --quiet --zone="${ZONE}" "${disk_name}"; then
+      echo
+      echo "FAILED TO DELETE PD. AGGRESSIVELY DETACHING ${disk_name}."
+      echo
+      for minion in "${MINION_NAMES[@]}"; do
+	  "${GCLOUD}" compute instances detach-disk --quiet --zone="${ZONE}" --disk="${disk_name}" "${minion}" || true
+      done
+      # This is lame. GCE internals may not finish the actual detach for a little while.
+      deleted="false"
+      for i in $(seq 1 12); do
+	  sleep 5;
+	  if gcloud compute disks delete --quiet --zone="${ZONE}" "${disk_name}"; then
+	      deleted="true"
+	      break
+	  fi
+      done
+      if [[ ${deleted} != "true" ]]; then
+	  # At the end of the day, just give up and leak this thing.
+	  echo "REALLY FAILED TO DELETE PD. LEAKING ${disk_name}."
+      fi
+  fi
 }
 
 trap "teardown" EXIT
 
 perl -p -e "s/%.*%/${disk_name}/g" ${KUBE_ROOT}/examples/gce-pd/testpd.yaml > ${config}
 
-# Create and mount the disk.
-gcloud compute disks create --zone="${ZONE}" --size=10GB "${disk_name}"
-gcloud compute instances attach-disk --zone="${ZONE}" --disk="${disk_name}" \
+# Create and format the disk.
+"${GCLOUD}" compute disks create --zone="${ZONE}" --size=10GB "${disk_name}"
+"${GCLOUD}" compute instances attach-disk --zone="${ZONE}" --disk="${disk_name}" \
   --device-name temp-data "${MASTER_NAME}"
-gcloud compute ssh --zone="${ZONE}" "${MASTER_NAME}" --command "sudo rm -rf /mnt/tmp"
-gcloud compute ssh --zone="${ZONE}" "${MASTER_NAME}" --command "sudo mkdir -p /mnt/tmp"
-gcloud compute ssh --zone="${ZONE}" "${MASTER_NAME}" --command "sudo /usr/share/google/safe_format_and_mount /dev/disk/by-id/google-temp-data /mnt/tmp"
-gcloud compute ssh --zone="${ZONE}" "${MASTER_NAME}" --command "sudo umount /mnt/tmp"
-gcloud compute instances detach-disk --zone="${ZONE}" --disk "${disk_name}" "${MASTER_NAME}"
+"${GCLOUD}" compute ssh --zone="${ZONE}" "${MASTER_NAME}" --command "sudo rm -rf /mnt/tmp"
+"${GCLOUD}" compute ssh --zone="${ZONE}" "${MASTER_NAME}" --command "sudo mkdir -p /mnt/tmp"
+"${GCLOUD}" compute ssh --zone="${ZONE}" "${MASTER_NAME}" --command "sudo /usr/share/google/safe_format_and_mount /dev/disk/by-id/google-temp-data /mnt/tmp"
+"${GCLOUD}" compute ssh --zone="${ZONE}" "${MASTER_NAME}" --command "sudo umount /mnt/tmp"
+"${GCLOUD}" compute instances detach-disk --zone="${ZONE}" --disk "${disk_name}" "${MASTER_NAME}"
 
+# Create a pod that uses the PD
+${KUBECFG} -c ${config} create pods
+
+pod_id_list=$($KUBECFG '-template={{range.items}}{{.id}} {{end}}' -l test=testpd list pods)
+# Pod turn up on a clean cluster can take a while for the docker image
+# pull, and even longer if the PD mount takes a bit.
+all_running=0
+for i in $(seq 1 30); do
+  echo "Waiting for pod to come up."
+  sleep 5
+  all_running=1
+  for id in $pod_id_list; do
+    current_status=$($KUBECFG -template '{{.currentState.status}}' get pods/$id) || true
+    if [[ "$current_status" != "Running" ]]; then
+      all_running=0
+      break
+    fi
+  done
+  if [[ "${all_running}" == 1 ]]; then
+    break
+  fi
+done
+if [[ "${all_running}" == 0 ]]; then
+  echo "Pods did not come up in time"
+  exit 1
+fi
+
+delete_pd_pod
+
+# Recreate the pod, this should re-mount the PD
 ${KUBECFG} -c ${config} create pods
 
 pod_id_list=$($KUBECFG '-template={{range.items}}{{.id}} {{end}}' -l test=testpd list pods)
 # Pod turn up on a clean cluster can take a while for the docker image pull.
 all_running=0
-for i in $(seq 1 24); do
-  echo "Waiting for pods to come up."
+for i in $(seq 1 30); do
+  echo "Waiting for pod to come up."
   sleep 5
   all_running=1
   for id in $pod_id_list; do

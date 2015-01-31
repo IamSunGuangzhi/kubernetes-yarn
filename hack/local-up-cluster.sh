@@ -88,10 +88,11 @@ esac
 GO_OUT="${KUBE_ROOT}/_output/local/bin/${host_os}/${host_arch}"
 
 APISERVER_LOG=/tmp/kube-apiserver.log
-"${GO_OUT}/kube-apiserver" \
-  -v=${LOG_LEVEL} \
+sudo "${GO_OUT}/kube-apiserver" \
+  --v=${LOG_LEVEL} \
   --address="${API_HOST}" \
   --port="${API_PORT}" \
+  --runtime_config=api/v1beta3 \
   --etcd_servers="http://127.0.0.1:4001" \
   --portal_net="10.0.0.0/24" \
   --cors_allowed_origins="${API_CORS_ALLOWED_ORIGINS}" >"${APISERVER_LOG}" 2>&1 &
@@ -101,55 +102,65 @@ APISERVER_PID=$!
 kube::util::wait_for_url "http://${API_HOST}:${API_PORT}/api/v1beta1/pods" "apiserver: "
 
 CTLRMGR_LOG=/tmp/kube-controller-manager.log
-"${GO_OUT}/kube-controller-manager" \
-  -v=${LOG_LEVEL} \
+sudo "${GO_OUT}/kube-controller-manager" \
+  --v=${LOG_LEVEL} \
   --machines="127.0.0.1" \
   --master="${API_HOST}:${API_PORT}" >"${CTLRMGR_LOG}" 2>&1 &
 CTLRMGR_PID=$!
 
 KUBELET_LOG=/tmp/kubelet.log
-"${GO_OUT}/kubelet" \
-  -v=${LOG_LEVEL} \
+sudo "${GO_OUT}/kubelet" \
+  --v=${LOG_LEVEL} \
   --etcd_servers="http://127.0.0.1:4001" \
   --hostname_override="127.0.0.1" \
   --address="127.0.0.1" \
+  --api_servers="${API_HOST}:${API_PORT}" \
+  --auth_path="${KUBE_ROOT}/hack/.test-cmd-auth" \
   --port="$KUBELET_PORT" >"${KUBELET_LOG}" 2>&1 &
 KUBELET_PID=$!
 
 PROXY_LOG=/tmp/kube-proxy.log
-"${GO_OUT}/kube-proxy" \
-  -v=${LOG_LEVEL} \
+sudo "${GO_OUT}/kube-proxy" \
+  --v=${LOG_LEVEL} \
   --master="http://${API_HOST}:${API_PORT}" >"${PROXY_LOG}" 2>&1 &
 PROXY_PID=$!
 
 SCHEDULER_LOG=/tmp/kube-scheduler.log
-"${GO_OUT}/kube-scheduler" \
-  -v=${LOG_LEVEL} \
+sudo "${GO_OUT}/kube-scheduler" \
+  --v=${LOG_LEVEL} \
   --master="http://${API_HOST}:${API_PORT}" >"${SCHEDULER_LOG}" 2>&1 &
 SCHEDULER_PID=$!
 
-echo "Local Kubernetes cluster is running. Press Ctrl-C to shut it down."
-echo "Logs: "
-echo "  ${APISERVER_LOG}"
-echo "  ${CTLRMGR_LOG}"
-echo "  ${KUBELET_LOG}"
-echo "  ${PROXY_LOG}"
-echo "  ${SCHEDULER_LOG}"
+cat <<EOF
+Local Kubernetes cluster is running. Press Ctrl-C to shut it down.
+
+Logs:
+  ${APISERVER_LOG}
+  ${CTLRMGR_LOG}
+  ${KUBELET_LOG}
+  ${PROXY_LOG}
+  ${SCHEDULER_LOG}
+
+To start using your cluster, open up another terminal/tab and run:
+
+  export KUBERNETES_PROVIDER=local
+  cluster/kubectl.sh
+EOF
 
 cleanup()
 {
     echo "Cleaning up..."
-    kill "${APISERVER_PID}"
-    kill "${CTLRMGR_PID}"
-    kill "${KUBELET_PID}"
-    kill "${PROXY_PID}"
-    kill "${SCHEDULER_PID}"
+    sudo kill "${APISERVER_PID}"
+    sudo kill "${CTLRMGR_PID}"
+    sudo kill "${KUBELET_PID}"
+    sudo kill "${PROXY_PID}"
+    sudo kill "${SCHEDULER_PID}"
 
     kill "${ETCD_PID}"
     rm -rf "${ETCD_DIR}"
     exit 0
 }
 
-trap cleanup EXIT SIGINT
+trap cleanup EXIT
 
-while true; do read x; done
+while true; do sleep 1; done

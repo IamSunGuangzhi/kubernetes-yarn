@@ -143,9 +143,8 @@ func TestRESTgetAttrs(t *testing.T) {
 			ResourceVersion: "0",
 			FieldPath:       "",
 		},
-		Status: "tested",
-		Reason: "forTesting",
-		Source: "test",
+		Reason: "ForTesting",
+		Source: api.EventSource{Component: "test"},
 	}
 	label, field, err := rest.getAttrs(eventA)
 	if err != nil {
@@ -162,26 +161,11 @@ func TestRESTgetAttrs(t *testing.T) {
 		"involvedObject.apiVersion":      testapi.Version(),
 		"involvedObject.resourceVersion": "0",
 		"involvedObject.fieldPath":       "",
-		"status":                         "tested",
-		"reason":                         "forTesting",
+		"reason":                         "ForTesting",
 		"source":                         "test",
 	}
 	if e, a := expect, field; !reflect.DeepEqual(e, a) {
 		t.Errorf("diff: %s", util.ObjectDiff(e, a))
-	}
-}
-
-func TestRESTUpdate(t *testing.T) {
-	_, rest := NewTestREST()
-	eventA := testEvent("foo")
-	c, err := rest.Create(api.NewDefaultContext(), eventA)
-	if err != nil {
-		t.Fatalf("Unexpected error %v", err)
-	}
-	<-c
-	_, err = rest.Update(api.NewDefaultContext(), eventA)
-	if err == nil {
-		t.Errorf("unexpected non-error")
 	}
 }
 
@@ -196,8 +180,8 @@ func TestRESTList(t *testing.T) {
 			ResourceVersion: "0",
 			FieldPath:       "",
 		},
-		Status: "tested",
-		Reason: "forTesting",
+		Reason: "ForTesting",
+		Source: api.EventSource{Component: "GoodSource"},
 	}
 	eventB := &api.Event{
 		InvolvedObject: api.ObjectReference{
@@ -208,8 +192,8 @@ func TestRESTList(t *testing.T) {
 			ResourceVersion: "0",
 			FieldPath:       "",
 		},
-		Status: "tested",
-		Reason: "forTesting",
+		Reason: "ForTesting",
+		Source: api.EventSource{Component: "GoodSource"},
 	}
 	eventC := &api.Event{
 		InvolvedObject: api.ObjectReference{
@@ -220,13 +204,13 @@ func TestRESTList(t *testing.T) {
 			ResourceVersion: "0",
 			FieldPath:       "",
 		},
-		Status: "untested",
-		Reason: "forTesting",
+		Reason: "ForTesting",
+		Source: api.EventSource{Component: "OtherSource"},
 	}
 	reg.ObjectList = &api.EventList{
 		Items: []api.Event{*eventA, *eventB, *eventC},
 	}
-	got, err := rest.List(api.NewContext(), labels.Everything(), labels.Set{"status": "tested"}.AsSelector())
+	got, err := rest.List(api.NewContext(), labels.Everything(), labels.Set{"source": "GoodSource"}.AsSelector())
 	if err != nil {
 		t.Fatalf("Unexpected error %v", err)
 	}
@@ -248,8 +232,7 @@ func TestRESTWatch(t *testing.T) {
 			ResourceVersion: "0",
 			FieldPath:       "",
 		},
-		Status: "tested",
-		Reason: "forTesting",
+		Reason: "ForTesting",
 	}
 	reg, rest := NewTestREST()
 	wi, err := rest.Watch(api.NewContext(), labels.Everything(), labels.Everything(), "0")
@@ -257,7 +240,7 @@ func TestRESTWatch(t *testing.T) {
 		t.Fatalf("Unexpected error %v", err)
 	}
 	go func() {
-		reg.Mux.Action(watch.Added, eventA)
+		reg.Broadcaster.Action(watch.Added, eventA)
 	}()
 	got := <-wi.ResultChan()
 	if e, a := eventA, got.Object; !reflect.DeepEqual(e, a) {

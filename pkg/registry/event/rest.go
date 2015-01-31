@@ -102,13 +102,12 @@ func (rs *REST) getAttrs(obj runtime.Object) (objLabels, objFields labels.Set, e
 		"involvedObject.kind":            event.InvolvedObject.Kind,
 		"involvedObject.namespace":       event.InvolvedObject.Namespace,
 		"involvedObject.name":            event.InvolvedObject.Name,
-		"involvedObject.uid":             event.InvolvedObject.UID,
+		"involvedObject.uid":             string(event.InvolvedObject.UID),
 		"involvedObject.apiVersion":      event.InvolvedObject.APIVersion,
 		"involvedObject.resourceVersion": fmt.Sprintf("%s", event.InvolvedObject.ResourceVersion),
 		"involvedObject.fieldPath":       event.InvolvedObject.FieldPath,
-		"status":                         event.Status,
 		"reason":                         event.Reason,
-		"source":                         event.Source,
+		"source":                         event.Source.Component,
 	}, nil
 }
 
@@ -127,7 +126,6 @@ func (*REST) New() runtime.Object {
 	return &api.Event{}
 }
 
-// Update returns an error: Events are not mutable.
-func (rs *REST) Update(ctx api.Context, obj runtime.Object) (<-chan apiserver.RESTResult, error) {
-	return nil, fmt.Errorf("not allowed: 'Event' objects are not mutable")
+func (*REST) NewList() runtime.Object {
+	return &api.EventList{}
 }

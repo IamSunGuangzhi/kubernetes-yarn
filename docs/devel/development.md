@@ -48,13 +48,49 @@ export PATH=$PATH:$GOPATH/bin
 ```
 
 ### Using godep
-Here is a quick summary of `godep`.  `godep` helps manage third party dependencies by copying known versions into Godeps/_workspace.  You can use `godep` in three ways:
+Here is a quick summary of `godep`.  `godep` helps manage third party dependencies by copying known versions into Godeps/_workspace. Here is the recommended way to set up your system. There are other ways that may work, but this is the easiest one I know of.
 
-1. Use `godep` to call your `go` commands.  For example: `godep go test ./...`
-2. Use `godep` to modify your `$GOPATH` so that other tools know where to find the dependencies.  Specifically: `export GOPATH=$GOPATH:$(godep path)`
-3. Use `godep` to copy the saved versions of packages into your `$GOPATH`.  This is done with `godep restore`.
+1. Devote a directory to this endeavor:
 
-We recommend using options #1 or #2.
+```
+export KPATH=$HOME/code/kubernetes
+mkdir -p $KPATH/src/github.com/GoogleCloudPlatform/kubernetes
+cd $KPATH/src/github.com/GoogleCloudPlatform/kubernetes
+git clone https://path/to/your/fork .
+# Or copy your existing local repo here. IMPORTANT: making a symlink doesn't work.
+```
+
+2. Set up your GOPATH.
+
+```
+# Option A: this will let your builds see packages that exist elsewhere on your system.
+export GOPATH=$KPATH:$GOPATH
+# Option B: This will *not* let your local builds see packages that exist elsewhere on your system.
+export GOPATH=$KPATH
+# Option B is recommended if you're going to mess with the dependencies.
+```
+
+3. Populate your new $GOPATH.
+
+```
+cd $KPATH/src/github.com/GoogleCloudPlatform/kubernetes
+godep restore
+```
+
+4. To add a dependency, you can do ```go get path/to/dependency``` as usual.
+
+5. To package up a dependency, do
+
+```
+cd $KPATH/src/github.com/GoogleCloudPlatform/kubernetes
+godep save ./...
+# Sanity check that your Godeps.json file is ok by re-restoring:
+godep restore
+```
+
+I (lavalamp) have sometimes found it expedient to manually fix the /Godeps/godeps.json file to minimize the changes.
+
+Please send dependency updates in separate commits within your PR, for easier reviewing.
 
 ## Hooks
 
@@ -101,6 +137,10 @@ godep go tool cover -html=target/c.out
 ## Integration tests
 
 You need an [etcd](https://github.com/coreos/etcd/releases/tag/v0.4.6) in your path, please make sure it is installed and in your ``$PATH``.
+```
+cd kubernetes
+hack/test-integration.sh
+```
 
 ## End-to-End tests
 
@@ -115,10 +155,53 @@ Pressing control-C should result in an orderly shutdown but if something goes wr
 go run e2e.go --down
 ```
 
-See the flag definitions in `hack/e2e.go` for more options, such as reusing an existing cluster.
+### Flag options
+See the flag definitions in `hack/e2e.go` for more options, such as reusing an existing cluster, here is an overview:
+
+```sh
+# Build binaries for testing
+go run e2e.go --build
+
+# Create a fresh cluster.  Deletes a cluster first, if it exists
+go run e2e.go --up
+
+# Create a fresh cluster at a specific release version.
+go run e2e.go --up --version=0.7.0
+
+# Test if a cluster is up.
+go run e2e.go --isup
+
+# Push code to an existing cluster
+go run e2e.go --push
+
+# Push to an existing cluster, or bring up a cluster if it's down.
+go run e2e.go --pushup
+
+# Run all tests
+go run e2e.go --test
+
+# Run tests matching a glob.
+go run e2e.go --tests=...
+```
+
+### Combining flags
+```sh
+# Flags can be combined, and their actions will take place in this order:
+# -build, -push|-up|-pushup, -test|-tests=..., -down
+# e.g.:
+go run e2e.go -build -pushup -test -down
+
+# -v (verbose) can be added if you want streaming output instead of only
+# seeing the output of failed commands.
+
+# -ctl can be used to quickly call kubectl against your e2e cluster. Useful for
+# cleaning up after a failed test or viewing logs.
+go run e2e.go -ctl='get events'
+go run e2e.go -ctl='delete pod foobar'
+```
 
 ## Testing out flaky tests
-[Instructions here](docs/devel/flaky-tests.md)
+[Instructions here](flaky-tests.md)
 
 ## Add/Update dependencies
 
@@ -155,16 +238,9 @@ git fetch upstream
 git rebase upstream/master
 ```
 
-## Regenerating the API documentation
+## Regenerating the CLI documentation
 
 ```
-cd kubernetes/api
-sudo docker build -t kubernetes/raml2html .
-sudo docker run --name="docgen" kubernetes/raml2html
-sudo docker cp docgen:/data/kubernetes.html .
+hack/run-gendocs.sh
 ```
 
-View the API documentation using htmlpreview (works on your fork, too):
-```
-http://htmlpreview.github.io/?https://github.com/GoogleCloudPlatform/kubernetes/blob/master/api/kubernetes.html
-```
