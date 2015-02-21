@@ -124,7 +124,7 @@ func YARNInit(handler *yarnSchedulerCallbackHandler) (*yarn_client.YarnClient, *
 	attemptId = 1
 	applicationAttemptId := hadoop_yarn.ApplicationAttemptIdProto{ApplicationId: asc.ApplicationId, AttemptId: &attemptId}
 
-	rmClient, _ := yarn_client.CreateAMRMClientAsync(conf, &applicationAttemptId, allocateIntervalMs, *handler)
+	rmClient, _ := yarn_client.CreateAMRMClientAsync(conf, allocateIntervalMs, *handler)
 
 	log.Println("Created RM client: ", rmClient)
 

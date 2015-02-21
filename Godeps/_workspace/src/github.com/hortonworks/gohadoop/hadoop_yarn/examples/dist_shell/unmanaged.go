@@ -66,6 +66,7 @@ func main() {
 		//in the unmanaged AM scenario, the returned token does NOT have the "service" field set
 		service, _ := conf.GetRMSchedulerAddress()
 		security.GetCurrentUser().AddUserTokenWithAlias(service, &savedAmRmToken)
+		log.Printf("saved: service=%s, token=%v\n", service, amRmToken)
 	}
 
 	log.Println("Application in state ", appState)
@@ -75,7 +76,7 @@ func main() {
 	attemptId = 1
 	applicationAttemptId := hadoop_yarn.ApplicationAttemptIdProto{ApplicationId: asc.ApplicationId, AttemptId: &attemptId}
 
-	rmClient, _ := yarn_client.CreateAMRMClient(conf, &applicationAttemptId)
+	rmClient, _ := yarn_client.CreateAMRMClient(conf)
 	log.Println("Created RM client: ", rmClient)
 
 	// Wait for ApplicationAttempt to be in Launched state

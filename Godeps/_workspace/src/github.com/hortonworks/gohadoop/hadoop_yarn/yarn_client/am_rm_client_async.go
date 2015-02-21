@@ -14,9 +14,8 @@ type AMRMClientAsync struct {
 	stop       chan bool
 }
 
-func CreateAMRMClientAsync(conf yarn_conf.YarnConfiguration, applicationAttemptId *hadoop_yarn.ApplicationAttemptIdProto,
-	intervalMs int, handler CallBackHandler) (*AMRMClientAsync, error) {
-	syncClient, err := CreateAMRMClient(conf, applicationAttemptId)
+func CreateAMRMClientAsync(conf yarn_conf.YarnConfiguration, intervalMs int, handler CallBackHandler) (*AMRMClientAsync, error) {
+	syncClient, err := CreateAMRMClient(conf)
 	return &AMRMClientAsync{client: syncClient, intervalMs: intervalMs, handler: handler, stop: make(chan bool, 1)}, err
 }
 

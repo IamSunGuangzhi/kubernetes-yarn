@@ -11,10 +11,9 @@ import (
 )
 
 type AMRMClient struct {
-	applicationAttemptId *hadoop_yarn.ApplicationAttemptIdProto
-	client               hadoop_yarn.ApplicationMasterProtocolService
-	responseId           int32
-	conf                 yarn_conf.YarnConfiguration
+	client     hadoop_yarn.ApplicationMasterProtocolService
+	responseId int32
+	conf       yarn_conf.YarnConfiguration
 }
 
 type resource_to_request struct {
@@ -29,19 +28,19 @@ var allocationRequests = struct {
 }{resourceRequests: make(map[int32]map[string]*resource_to_request),
 	releaseRequests: make(map[*hadoop_yarn.ContainerIdProto]bool)}
 
-func CreateAMRMClient(conf yarn_conf.YarnConfiguration, applicationAttemptId *hadoop_yarn.ApplicationAttemptIdProto) (*AMRMClient, error) {
+func CreateAMRMClient(conf yarn_conf.YarnConfiguration) (*AMRMClient, error) {
 	c, err := hadoop_yarn.DialApplicationMasterProtocolService(conf)
-	return &AMRMClient{applicationAttemptId: applicationAttemptId, client: c, conf: conf}, err
+	return &AMRMClient{client: c, conf: conf}, err
 }
 
 func (c *AMRMClient) RegisterApplicationMaster(host string, port int32, url string) error {
-	request := hadoop_yarn.RegisterApplicationMasterRequestProto{Host: &host, RpcPort: &port, TrackingUrl: &url, ApplicationAttemptId: c.applicationAttemptId}
+	request := hadoop_yarn.RegisterApplicationMasterRequestProto{Host: &host, RpcPort: &port, TrackingUrl: &url}
 	response := hadoop_yarn.RegisterApplicationMasterResponseProto{}
 	return c.client.RegisterApplicationMaster(&request, &response)
 }
 
 func (c *AMRMClient) FinishApplicationMaster(finalStatus *hadoop_yarn.FinalApplicationStatusProto, message string, url string) error {
-	request := hadoop_yarn.FinishApplicationMasterRequestProto{FinalApplicationStatus: finalStatus, Diagnostics: &message, TrackingUrl: &url, ApplicationAttemptId: c.applicationAttemptId}
+	request := hadoop_yarn.FinishApplicationMasterRequestProto{FinalApplicationStatus: finalStatus, Diagnostics: &message, TrackingUrl: &url}
 	response := hadoop_yarn.FinishApplicationMasterResponseProto{}
 	return c.client.FinishApplicationMaster(&request, &response)
 }
@@ -107,7 +106,7 @@ func (c *AMRMClient) Allocate() (*hadoop_yarn.AllocateResponseProto, error) {
 	allocationRequests.resourceRequests = make(map[int32]map[string]*resource_to_request)
 	allocationRequests.releaseRequests = make(map[*hadoop_yarn.ContainerIdProto]bool)
 
-	request := hadoop_yarn.AllocateRequestProto{ApplicationAttemptId: c.applicationAttemptId, Ask: asks, Release: releases, ResponseId: &c.responseId}
+	request := hadoop_yarn.AllocateRequestProto{Ask: asks, Release: releases, ResponseId: &c.responseId}
 	response := hadoop_yarn.AllocateResponseProto{}
 	err := c.client.Allocate(&request, &response)
 
